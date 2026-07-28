@@ -34,92 +34,159 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 Shared/Scripts/validate-runtime-identifiers.py
 
-  # Graph construction only. This evaluates every .dsc under the osx-arm64 qualifier -- type
-  # unions, switch arms, package references, download declarations -- and schedules the resulting
-  # pips without executing any of them, so it is the cheapest complete test of the DScript.
-  # /phase:Schedule is the last non-executing phase; the engine rejects /phase:Evaluate outright.
-  evaluate:
-    name: Evaluate osx-arm64 pip graph
+  # BuildXL is self-hosting, so the engine that constructs the pip graph is the *previously
+  # published* one, not the one in this tree. That engine owns two tables the DScript cannot
+  # override: the prelude it type checks config.dsc against (PreludeManager.GetPreludeRoot ->
+  # <engine>/Sdk.Prelude) and NugetFrameworkMonikers, which decides the literal union of the
+  # generated `targetRuntime` qualifier and whether runtimes/<rid>/lib/<tfm> assemblies count as
+  # managed. A new runtime identifier therefore cannot be introduced and consumed in one step.
+  #
+  # The repository has always done this in two stages -- c58de3fd8 registered the net10 moniker and
+  # 3d62441cd added the specs three months later -- and this job proves both halves without waiting
+  # for a publish in between:
+  #
+  #   stage 1  today's public LKG builds an engine from main plus the engine-only files of this
+  #            change. This is exactly what the first PR would contain, so a green stage 1 is the
+  #            evidence that it is landable.
+  #   stage 2  that freshly built engine, which now understands osx-arm64 and net11.0, builds the
+  #            full branch and cross-builds the osx-arm64 deployment.
+  #
+  # Both stages share one workspace so stage 2 reuses stage 1's cache. Out/ is gitignored, so
+  # switching the tree between stages with `git reset --hard` leaves the cache and the deployed
+  # engine untouched.
+  bootstrap:
+    name: Two-stage bootstrap and osx-arm64 cross-build
     needs: validate-runtime-identifiers
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Stage 1 is built from main, so the full history has to be present.
+          fetch-depth: 0
 
       - name: Free disk space
         run: |
           set -x
-          # The runner ships ~30 GB of toolchains this build never touches. Removing them keeps
-          # the NuGet cache and Out/ from filling the disk. dotnet is deliberately kept: bxl.sh
-          # uses it to restore the bootstrap package.
+          # The runner ships ~30 GB of toolchains this build never touches. Removing them keeps the
+          # NuGet cache and Out/ from filling the disk. dotnet is deliberately kept: bxl.sh uses it
+          # to restore the bootstrap package.
           sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
                       /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
                       /usr/share/swift || true
           df -h /
 
-      - name: Bootstrap and evaluate
+      - name: Stage 1 - materialize the engine-only change on top of main
         run: |
           set -euo pipefail
-          # No --internal: this is an external build, so bxl.sh reads BuildXLLkgVersionPublic.cmd
-          # and pulls the engine from the anonymous mseng/PipelineTools/BuildXL.External feed.
+          BRANCH_SHA=$(git rev-parse HEAD)
+          echo "BRANCH_SHA=$BRANCH_SHA" >> "$GITHUB_ENV"
+          git fetch --no-tags origin main
+          git checkout --detach origin/main
+
+          # The engine-only half of the change: everything the *running* engine needs in order to
+          # understand the osx-arm64 runtime identifier and the net11.0 moniker. Deliberately spelled
+          # out rather than derived, because this list is the proposed contents of the first PR.
+          git checkout "$BRANCH_SHA" -- \
+            Public/Sdk/Public/Prelude/Prelude.Context.dsc \
+            Public/Src/FrontEnd/Nuget/NugetFrameworkMonikers.cs \
+            Public/Src/FrontEnd/Script/Ambients/AmbientContext.cs \
+            Public/Src/FrontEnd/UnitTests/Nuget/NuSpecGeneratorTests.cs \
+            Public/Src/IDE/Generator/CsprojFile.cs \
+            Public/Src/Utilities/Configuration/IHost.cs \
+            Public/Src/Utilities/Configuration/Mutable/Host.cs
+
+          echo "=== stage 1 tree = main + ==="
+          git --no-pager diff --stat origin/main
+
+      - name: Stage 1 - build and deploy the engine with the published LKG
+        run: |
+          set -euo pipefail
+          # No --internal: an external build, so bxl.sh reads BuildXLLkgVersionPublic.cmd and pulls
+          # the engine from the anonymous mseng/PipelineTools/BuildXL.External feed.
+          # --deploy-dev implies a minimal build and rsyncs Out/Bin/release/linux-x64 to
+          # Out/Selfhost/Dev, which is where --use-dev looks.
           bash bxl.sh \
+            --deploy-dev \
+            --release \
+            --shared-comp \
+            /forceAddExecutionPermission- \
+            /logsDirectory:Out/Logs/Stage1Engine \
+            /logOutput:FullOutputOnWarningOrError
+
+      - name: Stage 1 - confirm the new engine carries the new vocabulary
+        run: |
+          set -euo pipefail
+          test -x Out/Selfhost/Dev/bxl
+          echo "=== prelude deployed with the engine ==="
+          grep -n "cpuArchitecture" Out/Selfhost/Dev/Sdk.Prelude/Prelude.Context.dsc
+          grep -q '"arm64"' Out/Selfhost/Dev/Sdk.Prelude/Prelude.Context.dsc
+          echo "OK: the stage 1 engine's prelude knows arm64"
+
+      - name: Stage 2 - restore the full change
+        run: |
+          set -euo pipefail
+          # Out/ is gitignored, so the cache and the stage 1 engine survive this.
+          git reset --hard
+          git checkout --detach "$BRANCH_SHA"
+          test -x Out/Selfhost/Dev/bxl
+
+      - name: Stage 2a - construct the osx-arm64 pip graph
+        run: |
+          set -euo pipefail
+          # /phase:Schedule is the last non-executing phase: it evaluates every spec under the
+          # osx-arm64 qualifier and schedules the pips without running any of them.
+          bash bxl.sh \
+            --use-dev \
             --shared-comp \
             /q:ReleaseDotNetCoreMacArm64 \
             /phase:Schedule \
-            /logsDirectory:Out/Logs/EvaluateOsxArm64 \
             /forceAddExecutionPermission- \
+            /logsDirectory:Out/Logs/EvaluateOsxArm64 \
             /logOutput:FullOutputOnWarningOrError
 
-      - name: Upload evaluation logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-evaluate-osx-arm64
-          path: Out/Logs/**
-          retention-days: 7
-          if-no-files-found: warn
-
-  crossbuild:
-    name: Cross-build osx-arm64 deployment
-    needs: evaluate
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          set -x
-          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-                      /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
-                      /usr/share/swift || true
-          df -h /
-
-      - name: Cross-build the osx-arm64 tree
+      - name: Stage 2b - cross-build the osx-arm64 deployment
         run: |
           set -euo pipefail
           bash bxl.sh \
+            --use-dev \
             --shared-comp \
             --release \
             /q:ReleaseDotNetCoreMacArm64 \
-            "/f:output='$PWD/Out/Bin/Release/osx-arm64/*'" \
-            /logsDirectory:Out/Logs/BuildOsxArm64 \
+            "/f:output='$PWD/Out/Bin/release/osx-arm64/*'" \
             /forceAddExecutionPermission- \
+            /logsDirectory:Out/Logs/BuildOsxArm64 \
             /logOutput:FullOutputOnWarningOrError
 
-      - name: Show what was produced
-        if: always()
+      - name: Verify the deployment is real
         run: |
-          echo "=== osx-arm64 deployment ==="
-          ls -la Out/Bin/Release/osx-arm64/ 2>/dev/null | head -40 || echo "(absent)"
-          du -sh Out/Bin/Release/osx-arm64 2>/dev/null || true
+          set -euo pipefail
+          out="Out/Bin/release/osx-arm64"
+          # A filter that matches nothing makes BuildXL succeed while building nothing, so the
+          # deployment has to be asserted explicitly rather than inferred from the exit code.
+          test -d "$out" || { echo "::error::$out was never created"; exit 1; }
+          count=$(find "$out" -type f | wc -l)
+          echo "$count files, $(du -sh "$out" | cut -f1)"
+          test "$count" -gt 0 || { echo "::error::$out is empty"; exit 1; }
+          test -f "$out/bxl" || { echo "::error::no bxl in $out"; exit 1; }
+          echo "=== architecture of the produced binaries ==="
+          file "$out/bxl" || true
+          find "$out" -name "*.dylib" | head -5 | while read -r f; do file "$f"; done
+
+      - name: Collect errors on failure
+        if: failure()
+        run: |
+          for f in $(find Out/Logs -name "BuildXL.err" 2>/dev/null); do
+            echo "########## $f"
+            head -c 20000 "$f"
+          done
 
       - name: Upload osx-arm64 deployment
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: buildxl-osx-arm64
-          path: Out/Bin/Release/osx-arm64/**
+          path: Out/Bin/release/osx-arm64/**
           retention-days: 7
           if-no-files-found: warn
 
@@ -127,7 +194,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-crossbuild-osx-arm64
+          name: logs-osx-arm64
           path: Out/Logs/**
           retention-days: 7
           if-no-files-found: warn
