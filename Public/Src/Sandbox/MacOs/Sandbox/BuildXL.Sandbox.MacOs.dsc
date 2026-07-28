@@ -43,7 +43,10 @@ namespace EndpointSecuritySandbox {
         f`${sandboxSourceRoot}/Linux/ReportBuilder.cpp`,
     ];
 
-    const brokerSources : File[] = [
+    // Everything the broker is made of except its entry point. The self test links the same set
+    // against a main of its own, which is what makes it a test of the shipping engine rather than of
+    // a copy of it.
+    const engineSources : File[] = [
         f`Taint.cpp`,
         f`NormalizedEvent.cpp`,
         f`SequenceTracker.cpp`,
@@ -55,11 +58,16 @@ namespace EndpointSecuritySandbox {
         f`ReplaySource.cpp`,
         f`Evidence.cpp`,
         f`EsIngress.cpp`,
+    ];
+
+    const brokerSources : File[] = [
+        ...engineSources,
         f`bxl-es-broker.cpp`,
     ];
 
     const headers : File[] = [
         ...globR(sandboxRoot, "*.h"),
+        ...globR(d`${sandboxRoot}/UnitTests`, "*.h"),
         ...globR(d`${sandboxSourceRoot}/Windows/DetoursServices`, "*.h"),
         ...globR(d`${sandboxSourceRoot}/Common`, "*.h"),
         ...globR(d`${sandboxSourceRoot}/Linux`, "*.h"),
@@ -67,6 +75,7 @@ namespace EndpointSecuritySandbox {
 
     const includeDirectories : Directory[] = [
         sandboxRoot,
+        d`${sandboxRoot}/UnitTests`,
         d`${sandboxSourceRoot}/Linux`,
         d`${sandboxSourceRoot}/Windows/DetoursServices`,
         d`${sandboxSourceRoot}/Common`,
@@ -89,6 +98,26 @@ namespace EndpointSecuritySandbox {
 
     @@public
     export const broker : DerivedFile = isMacOsHost ? build() : undefined;
+
+    /**
+     * The self test drives the broker's engine from a recorded event source rather than from Endpoint
+     * Security, so it needs no entitlement and no privileges - which is the whole point. It is the only
+     * check of the sandbox's soundness that can run on any Mac, and until it was a pip it only ever ran
+     * when somebody remembered to compile it by hand.
+     */
+    @@public
+    export const selfTest : DerivedFile = isMacOsHost ? buildSelfTest() : undefined;
+
+    /**
+     * Running it is a separate pip so that a failure names the run rather than the compile. Only
+     * attempted when the target architecture is the host's: a cross-built binary cannot be executed
+     * here, and silently skipping is better than depending on emulation being installed.
+     */
+    @@public
+    export const selfTestResult : DerivedFile =
+        isMacOsHost && Context.getCurrentHost().cpuArchitecture === (qualifier.targetRuntime === "osx-arm64" ? "arm64" : "x64")
+            ? runSelfTest()
+            : undefined;
 
     function build() : DerivedFile {
         const outDir = Context.getNewOutputDirectory("bxl-es-broker");
@@ -125,5 +154,63 @@ namespace EndpointSecuritySandbox {
         });
 
         return result.getOutputFile(outFile);
+    }
+
+    function buildSelfTest() : DerivedFile {
+        const outDir = Context.getNewOutputDirectory("bxl-es-selftest");
+        const outFile = p`${outDir}/bxl-es-selftest`;
+
+        const args : Argument[] = [
+            Cmd.option("-o ", Artifact.output(outFile)),
+            Cmd.args([
+                ...sharedSources,
+                ...engineSources,
+                f`UnitTests/ManifestBuilder.cpp`,
+                f`UnitTests/ReportReader.cpp`,
+                f`UnitTests/bxl-es-selftest.cpp`,
+            ].map(Artifact.input)),
+            Cmd.option("-arch ", targetArchitecture),
+            Cmd.argument("-std=c++17"),
+            Cmd.argument("-fblocks"),
+            Cmd.argument(`-mmacosx-version-min=${minimumOsVersion}`),
+            Cmd.argument("-DMAC_OS_ES_SANDBOX=1"),
+            Cmd.argument("-D_DARWIN_C_SOURCE"),
+            Cmd.argument(qualifier.configuration === "debug" ? "-O0" : "-O2"),
+            Cmd.flag("-g", qualifier.configuration === "debug"),
+            Cmd.options("-I", includeDirectories.map(d => Artifact.none(d))),
+            Cmd.argument("-lEndpointSecurity"),
+            Cmd.argument("-lbsm"),
+        ];
+
+        const result = Transformer.execute({
+            tool: clangTool,
+            workingDirectory: outDir,
+            arguments: args,
+            dependencies: headers,
+            tags: ["compile", "macos", "sandbox", "test"],
+        });
+
+        return result.getOutputFile(outFile);
+    }
+
+    function runSelfTest() : DerivedFile {
+        const outDir = Context.getNewOutputDirectory("bxl-es-selftest-run");
+        const logFile = p`${outDir}/selftest.log`;
+
+        const result = Transformer.execute({
+            tool: {
+                exe: selfTest,
+                prepareTempDirectory: true,
+                dependsOnCurrentHostOSDirectories: true
+            },
+            workingDirectory: outDir,
+            arguments: [],
+            consoleOutput: logFile,
+            // A non-zero exit fails the pip, which is the assertion: the self test reports the number
+            // of failed checks in its exit code.
+            tags: ["macos", "sandbox", "test"],
+        });
+
+        return result.getOutputFile(logFile);
     }
 }
