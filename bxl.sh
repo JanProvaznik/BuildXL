@@ -351,7 +351,73 @@ function setExecutablePermissions() {
         # Files that arrive via a downloaded package carry com.apple.quarantine, and Gatekeeper refuses
         # to execute them. This is a no-op when the attribute is absent, so it is safe to always run.
         xattr -d -r com.apple.quarantine "$BUILDXL_BIN" 2>/dev/null || true
+
+        adHocSignMachOExecutables
     fi
+}
+
+function adHocSignMachOExecutables() {
+    # Every executable in a BuildXL deployment is produced by AppHostPatcher, which writes the name of
+    # the managed assembly into a copy of the .NET apphost by patching its bytes in place. The apphost
+    # arrives from the Microsoft.NETCore.App.Host.<rid> package already ad-hoc signed, and patching it
+    # invalidates that signature while leaving the signature blob itself in place.
+    #
+    # On x86_64 macOS an invalid signature is tolerated, which is why this never surfaced while osx-x64
+    # was the only macOS target. On arm64 macOS it is fatal: the kernel refuses to map any binary whose
+    # signature does not verify and SIGKILLs it at exec. There is no diagnostic of any kind -- the shell
+    # reports "Killed: 9" (exit code 137) with nothing at all on stdout or stderr.
+    #
+    # Signing ad-hoc ("--sign -") requires no signing identity and no Apple developer account.
+    #
+    # This is repaired here, on the machine about to run the engine, rather than in the build that
+    # produced the deployment, because a macOS deployment can be cross-built on Linux or Windows where
+    # codesign does not exist. This is the first machine guaranteed to have it.
+    if ! command -v codesign > /dev/null 2>&1; then
+        return 0
+    fi
+
+    # Signing is only ever needed once per deployment, so if the main executable already verifies there
+    # is nothing to do. This keeps the common case to a single codesign call rather than a sweep.
+    if codesign --verify "$BUILDXL_BIN/bxl" > /dev/null 2>&1; then
+        return 0
+    fi
+
+    print_info "Ad-hoc signing Mach-O executables in '$BUILDXL_BIN'"
+
+    local signedCount=0
+    local failedCount=0
+    local f
+    while IFS= read -r -d '' f; do
+        case "$f" in
+            # Managed assemblies and data files make up the overwhelming majority of a deployment and
+            # are never Mach-O. Skipping them by name keeps this sweep near a second rather than a minute.
+            *.dll|*.pdb|*.json|*.js|*.ts|*.map|*.xml|*.txt|*.md|*.config|*.cs|*.dsc|*.h) continue;;
+        esac
+
+        # Anything whose signature already verifies is left strictly alone. The native libraries that
+        # come straight out of the runtime packs are signed by Microsoft and are not ours to re-sign.
+        if codesign --verify "$f" > /dev/null 2>&1; then
+            continue
+        fi
+
+        if [[ "$(file -b "$f" 2> /dev/null)" != Mach-O* ]]; then
+            continue
+        fi
+
+        if codesign --force --sign - "$f" > /dev/null 2>&1; then
+            signedCount=$((signedCount + 1))
+        else
+            print_error "Failed to ad-hoc sign '$f'"
+            failedCount=$((failedCount + 1))
+        fi
+    done < <(find "$BUILDXL_BIN" -type f -print0)
+
+    if [[ $failedCount -gt 0 ]]; then
+        print_error "Could not ad-hoc sign $failedCount executable(s) in '$BUILDXL_BIN'. On arm64 macOS these are killed on launch."
+        exit 1
+    fi
+
+    print_info "Ad-hoc signed $signedCount executable(s)"
 }
 
 function compileWithBxl() {
