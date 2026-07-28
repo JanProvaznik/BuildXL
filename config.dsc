@@ -610,10 +610,26 @@ config({
             // On macOS the CPU architecture has to be consulted, not just the OS: an Apple Silicon
             // Mac cannot execute osx-x64 binaries unless Rosetta 2 happens to be installed, and it
             // is neither installed by default nor guaranteed to remain available.
+            //
+            // This deliberately tests "not x86-family" rather than `=== "arm64"`. config.dsc is type
+            // checked against the prelude that ships *inside the running bxl deployment*
+            // (PreludeManager.GetPreludeRoot -> <engine>/Sdk.Prelude), not against
+            // Public/Sdk/Public/Prelude in this repo -- the engine must type check this file before
+            // it can learn where the repo's prelude lives. So every build parses config.dsc with the
+            // *previous* LKG's prelude, in which cpuArchitecture is still `"x64" | "x86"`, and
+            // `=== "arm64"` is a hard type error (DX9234 / TS2365) that fails during configuration
+            // parsing -- including in this change's own PR validation. Comparing against the two
+            // x86-family literals is well typed under both the old and the new prelude (Checker.cs
+            // only requires the operand types to be comparable in one direction, and a call
+            // expression is not a narrowable reference), evaluates to osx-x64 on an old engine and
+            // osx-arm64 on a new one, and therefore survives the window between this change landing
+            // and the first engine built from it being published.
             targetRuntime:
                 Context.getCurrentHost().os === "win" ? "win-x64" :
                 Context.getCurrentHost().os === "macOS"
-                    ? (Context.getCurrentHost().cpuArchitecture === "arm64" ? "osx-arm64" : "osx-x64")
+                    ? (Context.getCurrentHost().cpuArchitecture !== "x64" && Context.getCurrentHost().cpuArchitecture !== "x86"
+                        ? "osx-arm64"
+                        : "osx-x64")
                     : "linux-x64",
         },
         namedQualifiers: {
