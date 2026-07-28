@@ -158,9 +158,13 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
     // Run crossgen if specified and the framework/deployment style allows for it.
     // An additional condition is that cross-targeting is not supported by ReadyToRun, so we can only compile on the given target, 
     // see https://docs.microsoft.com/en-us/dotnet/core/whats-new/dotnet-core-3-0#cross-platformarchitecture-restrictions
+    //
+    // Conjunct order is load-bearing: supportsCrossgen() invokes the framework's crossgen provider,
+    // which resolves files out of the runtime pack. Testing the machine qualifier first keeps that
+    // resolution out of cross-target builds, which never run crossgen anyway.
     if (args.runCrossgenIfSupported && 
-        Shared.supportsCrossgen(args.deploymentStyle, framework, qualifier.targetRuntime) && 
-        qualifier.targetRuntime === Shared.TargetFrameworks.MachineQualifier.current.targetRuntime) {
+        qualifier.targetRuntime === Shared.TargetFrameworks.MachineQualifier.current.targetRuntime &&
+        Shared.supportsCrossgen(args.deploymentStyle, framework, qualifier.targetRuntime)) {
         
         // crossgen needs the runtime assemblies, not the compile ones
         const referenceClosure = Helpers.computeTransitiveClosure(args.references, args.runtimeContentToSkip, /*compile*/ false);

@@ -54,11 +54,15 @@ export function runtimeContentProvider(runtimeVersion: Shared.RuntimeVersion): F
 }
 
 export function crossgenProvider(runtimeVersion: Shared.RuntimeVersion): Shared.CrossgenFiles {
-    // Crossgen is deliberately not extended to osx-arm64: 'Microsoft.NETCore.App.Runtime.osx-arm64'
-    // is not known to carry a 'tools/crossgen', and a case pointing at a file that may not exist
-    // would turn an optimisation into a build break. Returning undefined is safe because
-    // Shared.supportsCrossgen() calls this provider with the target runtime and treats an undefined
-    // result as 'no crossgen for this runtime'.
+    // The arms below are already dead. No 'tools/crossgen' entry exists in
+    // Microsoft.NETCore.App.Runtime.{win-x64,osx-x64} at the pinned versions -- the only entry under
+    // 'tools/' is StandardOptimizationData.mibc -- so reaching either one raises
+    // FileNotFoundInStaticDirectory. That predates this change and is only reachable with
+    // [Sdk.BuildXL]enableCrossgen=1, which nothing in the repo or in .azdo sets.
+    //
+    // Crossgen is therefore deliberately not extended to osx-arm64: an extra arm would only add a
+    // third way to hit that. Returning undefined is safe -- this provider is a function of the
+    // runtime identifier and Shared.supportsCrossgen() treats undefined as 'no crossgen for it'.
     switch (runtimeVersion)
     {
         case "osx-x64":

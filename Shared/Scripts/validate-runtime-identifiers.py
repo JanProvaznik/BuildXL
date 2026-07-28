@@ -95,15 +95,8 @@ def check_unions():
                              f"(no osx-arm64 counterpart; packaging decision)")
 
 
-def _is_qualifier_type_annotation(text, pos):
-    """True when `pos` sits inside the object type literal of a qualifier declaration.
-
-    Resolved by brace balance rather than by a bounded regex. Both member separators are in use in
-    this repo -- `{ configuration: "debug", targetRuntime: "osx-x64" }` and the semicolon-separated
-    form seen in BuildXL.SBOMUtilities.dsc, RuntimeContracts.dsc and rocksDbSharp.dsc -- so any
-    pattern that cannot cross a `;` would classify half the repo's qualifier declarations as value
-    positions and never fire on them.
-    """
+def _enclosing_brace(text, pos):
+    """Index of the innermost `{` still open at `pos`, or -1."""
     depth = 0
     i = pos - 1
     while i >= 0:
@@ -112,13 +105,57 @@ def _is_qualifier_type_annotation(text, pos):
             depth += 1
         elif c == "{":
             if depth == 0:
-                break
+                return i
             depth -= 1
         i -= 1
-    if i < 0:
+    return -1
+
+
+def _opens_type_literal(text, brace, depth=0):
+    """Whether the `{` at index `brace` opens a *type* literal rather than a value literal.
+
+    Decided by what immediately precedes the brace. The one genuinely ambiguous form is `NAME: {`,
+    which is a property type annotation inside an interface but an ordinary property inside an
+    object literal -- config.dsc's 30 named qualifiers are exactly that. It is resolved by recursing
+    on the enclosing construct rather than by adding another pattern, because the two forms are
+    textually identical and only the context distinguishes them.
+    """
+    if brace < 0 or depth > 8:
         return False
-    return re.search(r'(declare\s+const\s+qualifier|export\s+declare\s+const\s+qualifier)\s*:\s*$',
-                     text[max(0, i - 200):i]) is not None
+    prefix = text[max(0, brace - 300):brace]
+    if re.search(r'\binterface\s+\w+[^{;=]*$', prefix):          # interface X extends Y {
+        return True
+    if re.search(r'\btype\s+\w+\s*=\s*$', prefix):              # type X = {
+        return True
+    if re.search(r'\b(?:const|let|var)\s+\w+\s*:\s*$', prefix):  # declare const qualifier : {
+        return True
+    if re.search(r'\)\s*:\s*$', prefix):                         # ) : {   (return type)
+        return True
+    m = re.search(r'(\w+)\s*:\s*$', prefix)
+    if m:
+        if prefix[:m.start()].rstrip().endswith("("):             # f(q: {   (first parameter)
+            return True
+        return _opens_type_literal(text, _enclosing_brace(text, brace), depth + 1)
+    return False
+
+
+def _is_qualifier_type_annotation(text, pos):
+    """True when `pos` sits inside a type literal.
+
+    The enclosing construct is found by brace balance rather than by a bounded regex. Both member
+    separators are in use in this repo -- `{ configuration: "debug", targetRuntime: "osx-x64" }` and
+    the semicolon-separated form in BuildXL.SBOMUtilities.dsc, RuntimeContracts.dsc and
+    rocksDbSharp.dsc -- so any pattern that cannot cross a `;` would classify half the repo's
+    qualifier declarations as value positions and never fire on them.
+
+    All type forms count, not just the inline `declare const qualifier : {...}`: Qualifiers.dsc is
+    the canonical home of the RID unions and declares them through `interface` and `type`, so
+    restricting this to the inline form would leave exactly the file that matters uncovered.
+
+    Known gap: a non-first parameter (`f(a: X, q: { ... })`) is read as a value position. No such
+    declaration exists in the repo, and the failure direction is a note rather than a false alarm.
+    """
+    return _opens_type_literal(text, _enclosing_brace(text, pos))
 
 
 # ---------------------------------------------------------------- check 2/3: switches & ternaries
