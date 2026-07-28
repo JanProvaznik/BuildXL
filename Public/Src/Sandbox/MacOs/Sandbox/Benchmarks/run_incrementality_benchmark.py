@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 # every result file. Results produced under different protocol hashes must not be compared.
 # --------------------------------------------------------------------------------------------
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 DEFAULT_REPEATS = 5
 
@@ -82,8 +82,22 @@ SCENARIOS = [
         "reset_cache": False,
         "rationale": (
             "The edited pip must miss because its input content changed. Everything downstream "
-            "must hit, because the compiler output is unchanged. This is the test that "
-            "distinguishes real content-based caching from timestamp-based rebuilds."
+            "should hit. Note that MSBuild already handles this case well via reference "
+            "assemblies -- measured at 1 of 40 projects rebuilt -- so this scenario is a parity "
+            "check, not a win to claim."
+        ),
+    },
+    {
+        "id": "timestamp-churn",
+        "title": "Identical content, new timestamps (branch switch / fresh clone / CI agent)",
+        "expect": "hit",
+        "mutation": "touch",
+        "reset_cache": False,
+        "rationale": (
+            "The decisive scenario. Measured on plain MSBuild this rebuilds 40 of 40 projects and "
+            "every one emits byte-identical output -- about 80% of a cold build, entirely wasted. "
+            "MSBuild compares timestamps and cannot do better. A content-addressed engine must "
+            "hit here, and if it does not, the fingerprint is picking up something it should not."
         ),
     },
     {
@@ -263,17 +277,34 @@ def run_build(bxl, repo, extra_args, log_prefix):
 COMMENT_MARKER = "// bxl-benchmark comment mutation"
 
 
-def apply_mutation(kind, target_file, counter):
+def apply_mutation(kind, target_file, counter, repo=None):
     """Mutate the target file. Returns a description of what was done.
 
-    'comment' adds a line comment: the file content changes, so the compile pip must miss, but
-    the compiler output is byte-identical, so everything downstream must hit. That asymmetry is
-    the whole point -- it is invisible to a timestamp-based build system.
+    'comment' adds a line comment: the file content changes, so the compile pip must miss, but the
+    compiler output is typically byte-identical.
 
     'observable' changes a string literal, which must propagate.
+
+    'touch' rewrites modification times without changing any content. This is what `git checkout`,
+    a fresh clone and a clean CI workspace all do, and it is the case where timestamp-based
+    incrementality is forced to redo everything while a content-addressed cache skips all of it.
     """
     if kind is None:
         return {"kind": "none"}
+
+    if kind == "touch":
+        stamp = time.time() + 1
+        touched = 0
+        skipped_dirs = {"bin", "obj", "Out", ".git", "node_modules"}
+        for dirpath, dirnames, filenames in os.walk(repo or os.path.dirname(target_file)):
+            dirnames[:] = [d for d in dirnames if d not in skipped_dirs]
+            for name in filenames:
+                try:
+                    os.utime(os.path.join(dirpath, name), (stamp, stamp))
+                    touched += 1
+                except OSError:
+                    pass
+        return {"kind": "touch", "files_touched": touched}
 
     with open(target_file, "r", errors="replace") as handle:
         original = handle.read()
@@ -396,7 +427,7 @@ def run_campaign(args):
                 if os.path.isdir(cache_dir):
                     shutil.rmtree(cache_dir, ignore_errors=True)
 
-            mutation = apply_mutation(scenario["mutation"], args.target_file, counter)
+            mutation = apply_mutation(scenario["mutation"], args.target_file, counter, args.repo)
 
             run = run_build(
                 args.bxl, args.repo, build_args, f"{scenario['id']}-{repeat}"
@@ -445,7 +476,7 @@ def run_campaign(args):
         result["scenarios"].append(entry)
 
     # Restore the tree so a benchmark run leaves no residue.
-    apply_mutation("revert", args.target_file, 0)
+    apply_mutation("revert", args.target_file, 0, args.repo)
 
     baseline = next(
         (s for s in result["scenarios"] if s["id"] == "cold" and s["wall_seconds"]), None

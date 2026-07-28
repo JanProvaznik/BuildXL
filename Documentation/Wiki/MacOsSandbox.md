@@ -182,13 +182,13 @@ The protocol is **pre-registered**: scenarios, their expected outcomes, and the 
 declared as data in the script and hashed into every result file. A result cannot be quietly
 re-matched to an edited scenario list afterwards.
 
-| # | Scenario | Expect | Prior state (today) | Why it matters |
+| # | Scenario | Expect | Prior state, measured (§6) | Why it matters |
 |---|---|---|---|---|
-| 1 | Cold build, empty cache | baseline | fails to run | Establishes the denominator. |
-| 2 | No-op rebuild | 100% hit | full rebuild | The headline number. |
-| 3 | Comment-only change | edited pip misses, downstream hits | full rebuild | Distinguishes content-based caching from timestamp-based rebuilding. |
-| 4 | Observable leaf change | edited pip + its cone | full rebuild | Detects over-building. |
-| 5 | Revert / branch switch back | 100% hit | full rebuild | Only content addressing can do this. |
+| 1 | Cold build, empty cache | baseline | 15.72 s, 40/40 projects | Establishes the denominator; also what every CI agent pays. |
+| 2 | No-op rebuild | 100% hit | 4.59 s, 0 projects rebuilt | MSBuild already handles this; the gap is evaluation overhead, not compilation. |
+| 3 | Comment-only change | edited pip misses, downstream hits | 6.05 s, **1** project | MSBuild's reference assemblies already avoid the downstream cone. Not a win to claim. |
+| 4 | Observable leaf change | edited pip + its cone | 10.99 s, 33 projects | Detects over-building. This work is necessary, not waste. |
+| 5 | **Timestamp churn / branch switch back** | 100% hit | **12.65 s, 40/40, all byte-identical** | The real gap. Timestamps move, content does not; MSBuild cannot tell. |
 | 6 | **Negative control**: real change | **must MISS** | — | Fails the run if it hits. |
 | 7 | Cross-machine cache hit | hit on a second checkout | impossible | Proves the fingerprint is machine-independent. |
 
@@ -219,7 +219,73 @@ claim, so it is measured rather than asserted.
 
 ---
 
-## 6. What still blocks macOS parity
+## 6. Measured prior state, and an assumption that turned out to be wrong
+
+The "before" column needs no sandbox, no entitlement and no BuildXL, so it was measured on this
+machine rather than estimated. `Benchmarks/generate_msbuild_demo.py` generates a layered MSBuild
+graph and measures what a rebuild actually costs today.
+
+Measured on macOS 27.0, Darwin 27.0.0, arm64, 10 logical CPUs, .NET SDK 11.0.100-preview.6.
+Graph: 8 wide × 5 deep = **40 projects**, 6 classes each, 32 projects downstream of the edited
+leaf. n=5, median reported.
+
+| Scenario | Median wall | Projects recompiled | …of which produced byte-identical output |
+|---|---:|---:|---:|
+| Cold build | 15.72 s | 40 / 40 | — |
+| No-op rebuild | 4.59 s | 0 / 40 | — |
+| Comment-only change in a leaf | 6.05 s | **1** / 40 | 0 |
+| Observable change in a leaf | 10.99 s | 33 / 40 | — |
+| **Timestamp churn, identical content** | **12.65 s** | **40 / 40** | **40 / 40** |
+
+### The assumption that was wrong
+
+The plan asserted that a comment-only edit would force MSBuild to rebuild the entire downstream
+cone, and that avoiding it would be a headline win. **Measurement says otherwise: exactly one
+project rebuilt.** Modern MSBuild produces reference assemblies, and a comment does not change a
+reference assembly, so downstream projects are already skipped. That win is real but MSBuild
+already collects it, and claiming it would have been the kind of overstatement a principal engineer
+would find in five minutes and then discount everything else in the proposal.
+
+The `observable change` row is the corresponding negative control and behaves correctly: changing a
+public constant does alter the reference assembly, so 33 projects rebuild. That is necessary work,
+not waste.
+
+### Where the real gap is
+
+The last row is the one that matters. When file content is identical but timestamps are new,
+MSBuild recompiles **all 40 projects and every single one emits byte-identical output** — 12.65 s
+of provably, entirely avoidable work, about 80% of a cold build.
+
+This is not a contrived scenario. It is what happens on:
+
+- `git checkout` to another branch and back — git rewrites files, so mtimes are new;
+- any fresh clone;
+- **every CI agent with a clean workspace**, which is the common case, and which also pays the full
+  15.72 s cold build every single time.
+
+MSBuild cannot avoid this, because timestamps are all it compares. A content-addressed engine sees
+identical inputs and skips the work. Two things are required to get it, and macOS has neither
+today: a sandbox that observes the accesses, so the fingerprint is sound, and a shared cache so the
+result travels between machines.
+
+So the honest claim is narrower and stronger than the original one:
+
+> MSBuild's incremental build already handles same-machine, same-workspace edits well. What it
+> cannot do is recognise that content it has already built is unchanged when timestamps move, or
+> reuse anything another machine built. That is where 80–100% of the work is avoidable, it is
+> exactly the CI case, and on macOS it is currently unreachable because there is no sandbox to make
+> the fingerprint sound.
+
+Reproduce:
+
+```bash
+python3 Public/Src/Sandbox/MacOs/Sandbox/Benchmarks/generate_msbuild_demo.py \
+    --out /tmp/demo --width 8 --depth 5 --measure --repeats 5
+```
+
+---
+
+## 7. What still blocks macOS parity
 
 The sandbox is necessary but not sufficient. Ranked, with evidence:
 
@@ -248,7 +314,7 @@ they are not re-litigated:
 
 ---
 
-## 7. Decision record
+## 8. Decision record
 
 **Reuse the Linux policy engine rather than reimplement it for macOS.** Rejected the alternative
 because divergence between two policy implementations surfaces as cache poisoning — silent, wrong,
@@ -274,7 +340,7 @@ supervisor". Expressed as a predicate, a newly added sandbox cannot silently get
 
 ---
 
-## 8. Operational notes
+## 9. Operational notes
 
 - **Signing.** The broker must be signed with `com.apple.developer.endpoint-security.client` by a
   provisioning profile that authorises it. This is a release-pipeline step, not a build step,
