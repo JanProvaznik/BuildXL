@@ -251,3 +251,128 @@ jobs:
           path: Out/Logs/**
           retention-days: 7
           if-no-files-found: warn
+
+  # A green cross-build proves an artifact can be *produced*. It says nothing about whether it can be
+  # *run*: an invalid code signature, a missing interop dylib, a missing RocksDb native and a report
+  # path that threw were all invisible to the Linux build and each one alone made the engine unusable
+  # on a Mac. GitHub's macOS runners are Apple Silicon, so that gap can be closed here rather than by
+  # someone remembering to try it by hand.
+  #
+  # What this job deliberately does not cover is the Endpoint Security sandbox. That needs macOS 27
+  # for es_new_descendants_client and an Apple-issued entitlement to instantiate a client; a hosted
+  # runner has neither, and no amount of CI will change that. Everything up to that point is covered.
+  run-on-apple-silicon:
+    name: Run the cross-built engine on Apple Silicon
+    needs: bootstrap
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the runner really is Apple Silicon
+        run: |
+          set -euo pipefail
+          sw_vers
+          echo "uname -m: $(uname -m)"
+          # Not decoration. The macOS pipeline this replaces ran osx-x64 binaries on an arm64 agent
+          # and passed only because that image ships Rosetta 2, so it was testing emulation rather
+          # than Apple Silicon. Asserting the architecture is what stops that happening again.
+          test "$(uname -m)" = "arm64" || { echo "::error::runner is not Apple Silicon"; exit 1; }
+
+      - name: Download the cross-built osx-arm64 deployment
+        uses: actions/download-artifact@v4
+        with:
+          name: buildxl-osx-arm64
+          path: Out/Selfhost/Dev
+
+      - name: Restore the execute bits that artifact upload drops
+        run: |
+          set -euo pipefail
+          # actions/upload-artifact does not preserve unix permissions, so every native binary in the
+          # deployment arrives non-executable. bxl.sh chmods the four it launches directly; the rest
+          # have to be restored before anything can exec them.
+          find Out/Selfhost/Dev -type f -print0 \
+            | xargs -0 file \
+            | grep ': *Mach-O' \
+            | sed 's/: *Mach-O.*//' \
+            | while IFS= read -r f; do chmod +x "$f"; done
+          echo "restored: $(find Out/Selfhost/Dev -type f -perm -u+x | wc -l | tr -d ' ') executables"
+          file Out/Selfhost/Dev/bxl
+
+      - name: Build the macOS interop library
+        run: |
+          set -euo pipefail
+          # CODESYNC: Public/Src/Sandbox/MacOs/Interop/BuildXL.Interop.MacOs.dsc
+          #
+          # The build produces this itself, but only when the host is macOS, because it needs the
+          # macOS SDK. A deployment cross-built on Linux therefore arrives without it and bxl cannot
+          # start at all: BuildXLApp's static constructor reaches MachineInfo.CreateForCurrentMachine,
+          # which P/Invokes into this library. Compiling it here is what makes the artifact runnable.
+          #
+          # This step becomes unnecessary once BuildXL.Tools.AppHostPatcher ships a tools/osx-arm64
+          # entry, because the engine can then build itself on this runner instead.
+          cd Public/Src/Sandbox/MacOs/Interop
+          clang -o "$GITHUB_WORKSPACE/Out/Selfhost/Dev/libBuildXLInterop.dylib" \
+            Posix/cpu.c Posix/io.c Posix/memory.c Posix/process.c \
+            -dynamiclib \
+            -arch arm64 \
+            -mmacosx-version-min=11.0 \
+            -install_name @rpath/libBuildXLInterop.dylib \
+            -fPIC \
+            -O2
+          file "$GITHUB_WORKSPACE/Out/Selfhost/Dev/libBuildXLInterop.dylib"
+
+      - name: Build the HelloWorld example
+        run: |
+          set -euo pipefail
+          # bxl.sh rather than the engine directly, because the ad-hoc signing sweep that makes a
+          # cross-built deployment runnable on arm64 lives there and is part of what is under test.
+          bash bxl.sh --use-dev \
+            "/c:$PWD/Examples/Walkthrough/HelloWorld/config.dsc" \
+            /sandboxKind:none \
+            /server- \
+            "/logsDirectory:$PWD/Out/Logs/HelloWorldCold" 2>&1 | tee /tmp/cold.log
+          grep -q "Build Succeeded" /tmp/cold.log || { echo "::error::cold build did not succeed"; exit 1; }
+
+      - name: Check that it produced real outputs
+        run: |
+          set -euo pipefail
+          # A build that schedules nothing also "succeeds", so the outputs are asserted rather than
+          # inferred from the exit code.
+          out=$(find Examples/Walkthrough/HelloWorld/Out -name "main_copy.out" | head -1)
+          test -n "$out" || { echo "::error::main_copy.out was never produced"; exit 1; }
+          echo "produced $out:"
+          cat "$out"
+          grep -q "Hello, world!" "$out" || { echo "::error::unexpected output contents"; exit 1; }
+
+      - name: Build it again and require every process to come from the cache
+        run: |
+          set -euo pipefail
+          bash bxl.sh --use-dev \
+            "/c:$PWD/Examples/Walkthrough/HelloWorld/config.dsc" \
+            /sandboxKind:none \
+            /server- \
+            "/logsDirectory:$PWD/Out/Logs/HelloWorldWarm" 2>&1 | tee /tmp/warm.log
+          grep -q "Build Succeeded" /tmp/warm.log || { echo "::error::warm build did not succeed"; exit 1; }
+          # The percentage in "Cache savings" is formatted with the runner's locale, so the process
+          # counters are matched instead. Two processes, both hits, is the whole claim.
+          grep -q "Processes: \[2 done (2 hit)" /tmp/warm.log \
+            || { echo "::error::second build was not fully cached"; grep -o "Processes: \[[^]]*\]" /tmp/warm.log | tail -3; exit 1; }
+          echo "OK: 2/2 processes served from cache"
+
+      - name: Collect errors on failure
+        if: failure()
+        run: |
+          for f in $(find Out/Logs Examples -name "BuildXL.err" 2>/dev/null); do
+            echo "########## $f"
+            head -c 20000 "$f"
+          done
+
+      - name: Upload macOS run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-run-on-apple-silicon
+          path: Out/Logs/**
+          retention-days: 7
+          if-no-files-found: warn
