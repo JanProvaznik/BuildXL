@@ -344,7 +344,19 @@ int main(int argc, char **argv)
     // subscription silently did nothing, this is where it is caught - not after the pip has run.
     if (!engine.EstablishBaseline())
     {
+        // Failing here and continuing anyway would be the worst outcome available: the tool would run
+        // with a stream that was never proven to deliver, its accesses might never be reported, and
+        // BuildXL would cache the result as though it had been observed. The fence exists precisely to
+        // stop that, so its failure has to stop the launch.
         Fail("the Endpoint Security stream did not deliver the baseline marker");
+        engine.Shutdown();
+        ingress.Stop();
+        sink.WriteDebugMessage(
+            buildxl::linux::DebugEventSeverity::kError,
+            static_cast<int32_t>(getpid()),
+            "macOS sandbox could not confirm the Endpoint Security stream was delivering; refusing to launch the tool unobserved");
+        CloseReportStream(sink, &manifest, argv[0]);
+        return kBrokerFailureExitCode;
     }
 
     // Installed before the tool exists, so a cancellation that arrives during startup is still
