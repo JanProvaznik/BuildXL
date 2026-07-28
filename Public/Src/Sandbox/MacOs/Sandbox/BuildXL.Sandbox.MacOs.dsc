@@ -201,10 +201,28 @@ namespace EndpointSecuritySandbox {
             tool: {
                 exe: selfTest,
                 prepareTempDirectory: true,
-                dependsOnCurrentHostOSDirectories: true
+                dependsOnCurrentHostOSDirectories: true,
+                // A self test that hangs should be reported as a hang rather than inherit the default
+                // budget silently. The sweep below runs in seconds; these leave generous headroom for
+                // a loaded machine while still bounding the damage.
+                timeoutInMilliseconds: 10 * 60 * 1000,
+                warningTimeoutInMilliseconds: 2 * 60 * 1000,
             },
             workingDirectory: outDir,
-            arguments: [],
+            arguments: [
+                // The default 100k-scenario sweep spends most of its wall clock asleep: roughly one
+                // scenario in seventeen drops the closing marker on purpose, and each of those waits
+                // out the fence timeout. The scenarios are generated from the iteration index, so a
+                // shorter sweep is a prefix of the long one rather than a different sample: it covers
+                // every single fault and most pairs, which is what a per-build regression check needs.
+                // The full sweep stays the default for a deliberate run.
+                Cmd.option("--sweep ", 2000),
+
+                // Correctness decides this pip. The throughput and latency gates measure the machine
+                // as well as the code, and this pip runs while the rest of the build is competing for
+                // the same cores, so they are measured and printed here but never fail the build.
+                Cmd.argument("--no-perf-gates"),
+            ],
             consoleOutput: logFile,
             // A non-zero exit fails the pip, which is the assertion: the self test reports the number
             // of failed checks in its exit code.

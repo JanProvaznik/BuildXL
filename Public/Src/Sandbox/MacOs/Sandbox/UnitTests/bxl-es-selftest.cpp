@@ -211,6 +211,14 @@ ScenarioResult RunScenario(const ScenarioOptions &options, buildxl::common::File
 int g_failures = 0;
 int g_checks = 0;
 
+// Correctness gates always decide the exit code: they compare what the protocol reported against what
+// the corpus did, and the answer does not depend on the machine. Throughput and latency gates are a
+// different kind of claim - they measure the hardware and its current load as much as they measure the
+// code - so they only decide the exit code when the caller asked for a benchmark. Inside a build the
+// same numbers are still measured and printed, but a machine that is busy running the rest of the
+// build must not turn a timing dip into a build failure.
+bool g_perfGates = true;
+
 void Check(bool condition, const std::string &description)
 {
     g_checks++;
@@ -219,6 +227,17 @@ void Check(bool condition, const std::string &description)
         g_failures++;
         fprintf(stderr, "FAIL: %s\n", description.c_str());
     }
+}
+
+void CheckPerf(bool condition, const std::string &description)
+{
+    if (g_perfGates)
+    {
+        Check(condition, description);
+        return;
+    }
+
+    printf("  advisory          %s: %s\n", condition ? "met" : "NOT MET", description.c_str());
 }
 
 void ReportScenario(const char *name, const ScenarioResult &result)
@@ -608,11 +627,11 @@ static void RunBenchmark(buildxl::common::FileAccessManifest *manifest)
 
     // The ingress budget matters because an Endpoint Security AUTH handler that misses its deadline
     // gets its client killed. The bounded-work callback must stay far below any plausible deadline.
-    Check(p99 < 100000, "ingress p99 must stay under 100us");
+    CheckPerf(p99 < 100000, "ingress p99 must stay under 100us");
 
     // A build that keeps every core busy is nowhere near this rate per pip; the floor exists to catch
     // regressions in the decision path, which is the only part that scales with access count.
-    Check(eventsPerSecond > 100000, "sustained drain throughput must stay above 100k events/s");
+    CheckPerf(eventsPerSecond > 100000, "sustained drain throughput must stay above 100k events/s");
 }
 
 int main(int argc, char **argv)
@@ -630,9 +649,13 @@ int main(int argc, char **argv)
         {
             evidencePath = argv[++i];
         }
+        else if (std::strcmp(argv[i], "--no-perf-gates") == 0)
+        {
+            g_perfGates = false;
+        }
         else if (std::strcmp(argv[i], "--help") == 0)
         {
-            printf("usage: bxl-es-selftest [--sweep N] [--evidence PATH]\n");
+            printf("usage: bxl-es-selftest [--sweep N] [--evidence PATH] [--no-perf-gates]\n");
             return 0;
         }
     }
@@ -641,6 +664,9 @@ int main(int argc, char **argv)
 
     printf("BuildXL macOS sandbox protocol conformance\n");
     printf("==========================================\n");
+    printf("sweep %" PRIu64 " scenarios, perf gates %s\n",
+        sweepIterations,
+        g_perfGates ? "enforced" : "advisory (measured and printed, not asserted)");
 
     const uint64_t start = NowNanos();
 
