@@ -6,10 +6,22 @@ parameters:
   type: string
   default: x64
 
+# Previously every job -- including the one on the macos-15-arm64 agent -- downloaded the osx-x64
+# binaries and ran them, which only works because that image happens to ship Rosetta 2. A Mac without
+# Rosetta 2 reports "Bad CPU type in executable" and nothing runs at all, so the arm64 job was not
+# actually testing macOS on Apple Silicon: it was testing x86_64 emulation. Each job now uses the
+# runtime identifier that matches its agent, and the native library is built for that same architecture.
 jobs:
 - job: runTests_${{ parameters.platform }}
   dependsOn: buildTests
   displayName: Run Unit Tests with XUnit on MacOS ${{ parameters.platform }}
+  variables:
+    ${{ if eq(parameters['platform'], 'x64') }}:
+      rid: osx-x64
+      nativeArch: x86_64
+    ${{ else }}:
+      rid: osx-arm64
+      nativeArch: arm64
   pool:
     ${{ if eq(parameters['platform'], 'x64') }}:
       vmImage: macos-15
@@ -39,27 +51,27 @@ jobs:
     displayName: Build Debug libBuildXLInterop.dylib
     inputs:
       filePath: '$(Build.SourcesDirectory)/Private/macOS/xcodebuild.sh'
-      arguments: '--projectPath $(Build.SourcesDirectory)/Public/Src/Sandbox/MacOs/Interop/Interop.xcodeproj --scheme InteropLibrary --configuration debug --outputDirectory $(Agent.TempDirectory)/BuildXLMacOS/InteropLibrary --bundlePath $(Build.SourcesDirectory)/Public/Src/Sandbox/MacOs/BundleInfo.xcconfig'
+      arguments: '--projectPath $(Build.SourcesDirectory)/Public/Src/Sandbox/MacOs/Interop/Interop.xcodeproj --scheme InteropLibrary --configuration debug --outputDirectory $(Agent.TempDirectory)/BuildXLMacOS/InteropLibrary --bundlePath $(Build.SourcesDirectory)/Public/Src/Sandbox/MacOs/BundleInfo.xcconfig --arch $(nativeArch)'
       workingDirectory: '$(Agent.TempDirectory)/BuildXLMacOS'
 
   - task: Bash@3
     displayName: Copy libBuildXLInterop.dylib to test directory
     inputs:
       targetType: 'inline'
-      script: 'cp $(Agent.TempDirectory)/BuildXLMacOS/InteropLibrary/Build/Products/debug/libBuildXLInterop.dylib $(System.ArtifactsDirectory)/tests/macos-tests-$(Build.BuildId)/osx-x64/tests/sharedbin/libBuildXLInterop.dylib'
+      script: 'cp $(Agent.TempDirectory)/BuildXLMacOS/InteropLibrary/Build/Products/debug/libBuildXLInterop.dylib $(System.ArtifactsDirectory)/tests/macos-tests-$(Build.BuildId)/$(rid)/tests/sharedbin/libBuildXLInterop.dylib'
       workingDirectory: '$(Agent.TempDirectory)/BuildXLMacOS/InteropLibrary'
 
   - task: Bash@3
     displayName: Run Tests
     inputs:
-      filePath: '$(System.ArtifactsDirectory)/tests/macos-tests-$(Build.BuildId)/osx-x64/bashrunner.sh'
-      workingDirectory: '$(System.ArtifactsDirectory)/tests/macos-tests-$(Build.BuildId)/osx-x64'
+      filePath: '$(System.ArtifactsDirectory)/tests/macos-tests-$(Build.BuildId)/$(rid)/bashrunner.sh'
+      workingDirectory: '$(System.ArtifactsDirectory)/tests/macos-tests-$(Build.BuildId)/$(rid)'
       failOnStderr: true
   
   - task: PublishBuildArtifacts@1
     displayName: Publish Test Logs on Failure
     condition: failed() 
     inputs:
-      PathtoPublish: '$(System.ArtifactsDirectory)/tests/macos-tests-$(Build.BuildId)/osx-x64/tests/sharedbin/XunitLogs'
+      PathtoPublish: '$(System.ArtifactsDirectory)/tests/macos-tests-$(Build.BuildId)/$(rid)/tests/sharedbin/XunitLogs'
       ArtifactName: 'macos-tests-xunit-logs-$(Build.BuildId)-${{ parameters.platform }}'
       publishLocation: 'Container'

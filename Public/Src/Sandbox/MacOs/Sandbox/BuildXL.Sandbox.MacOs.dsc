@@ -77,6 +77,14 @@ namespace EndpointSecuritySandbox {
      */
     const minimumOsVersion = "27.0";
 
+    /**
+     * Built for the architecture named by the target runtime rather than the host's. Without an
+     * explicit -arch, clang emits host-architecture code, which would silently produce an x86_64
+     * broker when cross-building osx-arm64 from an Intel Mac -- a binary that cannot be loaded on
+     * the machine it is meant for.
+     */
+    const targetArchitecture = qualifier.targetRuntime === "osx-arm64" ? "arm64" : "x86_64";
+
     @@public
     export const broker : DerivedFile = isMacOsHost ? build() : undefined;
 
@@ -88,6 +96,7 @@ namespace EndpointSecuritySandbox {
             Cmd.option("-o ", Artifact.output(outFile)),
             Cmd.args([...sharedSources, ...brokerSources].map(Artifact.input)),
             Cmd.args(headers.map(Artifact.input)),
+            Cmd.option("-arch ", targetArchitecture),
             Cmd.argument("-std=c++17"),
             // Endpoint Security's client handler is a block, so blocks must be enabled.
             Cmd.argument("-fblocks"),

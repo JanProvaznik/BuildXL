@@ -5,6 +5,9 @@ trigger: none # Explicitly scheduled for PRs
 
 jobs:
 - job: buildTests
+  # Cross-builds both macOS runtime identifiers in a single invocation so the two qualifiers share one
+  # graph and one cache. The published artifact therefore contains an osx-x64/ and an osx-arm64/ tree,
+  # and each test job picks the one matching the agent it runs on.
   displayName: Build Unit Test Deployment with BuildXL on Windows
   pool:
     name: BuildXL-DevOpsAgents-Selfhost-BuildCache
@@ -22,6 +25,7 @@ jobs:
       /f:output='$(Build.SourcesDirectory)\Out\Bin\Release\tests\*'
       /p:[Sdk.BuildXL]microsoftInternal=1
       /q:ReleaseDotNetCoreMac
+      /q:ReleaseDotNetCoreMacArm64
       /logOutput:FullOutputOnWarningOrError
       /scrubDirectory:Out\objects
       /cachemiss:BxlMacOSPRValidation

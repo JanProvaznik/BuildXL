@@ -292,7 +292,7 @@ The sandbox is necessary but not sufficient. Ranked, with evidence:
 | # | Blocker | Evidence | Nature |
 |---|---|---|---|
 | 1 | **The ES entitlement** | `ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED`; ad-hoc signing → AMFI kill | External (Apple); gates gates C and E |
-| 2 | **`osx-arm64` is not a runtime identifier anywhere in the repo** | `Public/Sdk/SelfHost/BuildXL/Qualifiers.dsc:23` — `"win-x64" \| "osx-x64" \| "linux-x64"`; `BuildXLSdk.dsc:184` — `isTargetRuntimeOsx = qualifier.targetRuntime === "osx-x64"` | Every Apple Silicon Mac runs BuildXL under Rosetta 2 today |
+| 2 | ~~**`osx-arm64` is not a runtime identifier anywhere in the repo**~~ | See §10 | **Fixed by this work** |
 | 3 | **Grpc.Core has no arm64 slice for macOS** | `Grpc.Core` 2.46.6 ships `linux-arm64` but no `osx-arm64`; its `libgrpc_csharp_ext.x64.dylib` is non-fat x86_64 (verified with `lipo`) | Root cause of #2. Mitigation is already in progress: `GrpcDotNetClientOptions`/`GrpcDotNetServerOptions` exist, so this is finishing a migration, not starting one |
 | 4 | **Tests disabled on macOS** | `Public/Src/Deployment/Tests.MacOS/Tests.MacOS.dsc:22,33,36,38` — "Depends on Grpc.Core which is not supported on arm64" | Downstream of #3 |
 | 5 | **MSBuild frontend Windows assumptions** | `PipConstructor.cs:603-619` hardcodes `mspdbsrv.exe`, `vctip.exe`, `conhost.exe`, `VBCSCompiler.exe` | Breakaway-process list needs macOS equivalents |
@@ -349,3 +349,151 @@ supervisor". Expressed as a predicate, a newly added sandbox cannot silently get
   can observe a process tree soundly, so there is nothing to fall back to.
 - **Message-version drift.** New ES fields are always additive, so the broker warns on an unknown
   version and continues. It never fails a build because Apple shipped a newer OS.
+
+---
+
+## 10. `osx-arm64` as a first-class runtime identifier
+
+### 10.1 The finding
+
+BuildXL's macOS binaries are cross-built on Windows with `/q:ReleaseDotNetCoreMac`, which is
+**osx-x64**. `.azdo/pr/macos-build-native-and-run-tests.yml` then downloaded that same `osx-x64`
+tree and ran `osx-x64/bashrunner.sh` on a `macos-15-arm64` agent. That job was not testing macOS on
+Apple Silicon; it was testing x86_64 emulation, and it only passed because the Azure image happens
+to ship Rosetta 2.
+
+Rosetta 2 is not a given. On the machine this work was done on:
+
+```
+$ arch -x86_64 /usr/bin/true
+arch: posix_spawnp: /usr/bin/true: Bad CPU type in executable
+```
+
+Apple has stated Rosetta 2 will be reduced to a legacy-app compatibility layer after macOS 27. So
+this is not a performance question. Without `osx-arm64`, BuildXL's macOS support is one OS release
+away from not existing.
+
+There is also no escape hatch: `microsoft.buildxl.osx-x64` and `microsoft.buildxl.osx-arm64` both
+return **HTTP 404** on the public feed. Only `win-x64` and `linux-x64` have ever been published, so
+there is no macOS BuildXL to download and no way to bootstrap one on a Mac.
+
+### 10.2 Root cause
+
+A two-line comment in `Public/Src/Utilities/Configuration/Mutable/Host.cs`:
+
+```csharp
+// $Future we don't handle Arm or other Cpu's yet
+CpuArchitecture = Environment.Is64BitOperatingSystem ? HostCpuArchitecture.X64 : HostCpuArchitecture.X86;
+```
+
+`HostCpuArchitecture` had only `X86` and `X64`. `Context.getCurrentHost().cpuArchitecture` could
+therefore never report `arm64`, and no spec could branch on it even if it wanted to. Everything else
+— the qualifier unions, the package set, the framework specs — followed from that.
+
+### 10.3 `ProcessArchitecture`, not `OSArchitecture`
+
+`Host.CpuArchitecture` is derived from `RuntimeInformation.ProcessArchitecture`. This distinction is
+load-bearing rather than stylistic. On an Apple Silicon Mac, an x64 process running under Rosetta 2
+reports `OSArchitecture == Arm64` but `ProcessArchitecture == X64`.
+
+Specs use this value to decide which native tools and runtime packages to load into, or execute
+from, this process, so the process architecture is the correct answer. Using `OSArchitecture` would
+have changed behaviour on the existing macOS CI agents the moment this landed: `AppHostPatcher` would
+have started looking for `tools/osx-arm64/AppHostPatcher`, which the package does not contain, and
+the JavaScript frontend tests that gate on `cpuArchitecture === "x64"` would have silently switched
+off. With `ProcessArchitecture`, the value only becomes `Arm64` once BuildXL genuinely runs natively
+on arm64, so every existing deployment is bit-for-bit unaffected.
+
+### 10.4 Dependencies with no arm64 build
+
+These are handled explicitly rather than by falling through to a wrong answer.
+
+| Dependency | State | Handling |
+|---|---|---|
+| `Grpc.Core` 2.46.6 | Its only macOS dylib is a non-fat x86_64 `libgrpc_csharp_ext.x64.dylib` (`lipo`-verified) | Nothing deployed for `osx-arm64`. The managed Grpc.Net stack needs no native asset. Note the previous ternary chain fell through to the **linux-x64 `.so`** for any unrecognised runtime, so `osx-arm64` would otherwise have received a Linux shared object |
+| `RocksDbNative` 8.1.1 | Ships `build/native/amd64` only | Fails with a message naming the exact artifact that must be published (`build/native/arm64/librocksdb.dylib`), rather than a generic missing-file error |
+| `crossgen` | Not known to exist in `Microsoft.NETCore.App.Runtime.osx-arm64` | Deliberately unhandled. It is an optional optimisation and an unhandled runtime already falls through to "no crossgen available". A case pointing at a file that may not exist would turn an optimisation into a build break |
+| `BuildXL.Tools.AppHostPatcher` 2.0.0 | Ships `tools/{win-x64,osx-x64,linux-x64}` | The patcher is selected by **host** architecture and the apphost by **target**; these are different axes and were previously conflated. Cross-building `osx-arm64` from Windows or Linux works today; running the patcher natively on an arm64 Mac needs a `tools/osx-arm64` entry in that package |
+
+### 10.5 Verification
+
+BuildXL cannot be built or run on `osx-arm64` yet — that is what this change enables — so the
+DScript here cannot be evaluated locally and CI is the verification step. This is the same caveat
+that applies to the sandbox specs and the .NET 11 change set. What *was* checked:
+
+| Check | Result |
+|---|---|
+| `BuildXL.Utilities.Configuration` compiles with the `HostCpuArchitecture` change | Clean; the only errors are types from assemblies deliberately not included in the probe |
+| `bxl.sh` and `xcodebuild.sh` parse | `bash -n` clean |
+| Pipeline YAML parses and has valid job-template structure | Clean |
+| Every added package id, version and download URL | Resolved against the live feeds |
+| Every added VSO0 hash | Computed from the downloaded artifact, with a hasher first validated by reproducing a checked-in hash byte for byte |
+| ES broker builds and passes conformance as a **native arm64** binary | `lipo -archs` → `arm64`; **67 checks, 0 failures** |
+| Static completeness pass over all 839 DScript files | Every `targetRuntime` type union, every runtime `switch` and every arm64 `importFrom` is complete; three deliberate exclusions annotated in place |
+
+The static pass is worth describing, because without a working `bxl` it is the only mechanical
+validation available. It asserts that (a) every `targetRuntime` type union admitting `osx-x64` also
+admits `osx-arm64`, (b) every `switch` over a runtime identifier with an `osx-x64` case has an
+`osx-arm64` case or an annotated exclusion, (c) every `importFrom` naming an arm64 package resolves
+to a package, module or download declared in the nuget configuration, and (d) the architecture is
+plumbed end to end from `HostCpuArchitecture` through `AmbientContext` to the Prelude union. It
+distinguishes *type* positions, which are correctness failures, from *value* positions such as
+`withQualifier({ targetRuntime: "osx-x64" })`, which are packaging decisions and are reported
+informationally.
+
+### 10.6 The bootstrap order
+
+There is a chicken-and-egg problem worth stating plainly, because it determines the landing sequence:
+
+1. Land the RID support (this change). Verified by Windows/Linux CI.
+2. CI cross-builds an `osx-arm64` deployment and publishes `Microsoft.BuildXL.osx-arm64`.
+3. `bxl.sh` can then bootstrap natively on a Mac, because an LKG exists for it to download.
+
+Step 3 is unreachable before step 2, and step 2 is unreachable before step 1. `bxl.sh` already
+contains the macOS support needed for step 3; it maps `uname -m` to `DotNetCoreMacArm64`/`osx-arm64`
+with no Rosetta fallback, guards the `/etc/*-release` read that aborts under `set -e` on macOS, skips
+the Linux-only EBPF and runtime-validation arguments, and clears `com.apple.quarantine` from the
+bootstrapped engine so Gatekeeper does not refuse to execute it.
+
+---
+
+## 11. QuickBuild and the MSBuild project cache: what is actually available
+
+This was researched rather than assumed, because the obvious pitch — "do what QuickBuild does" — does
+not survive contact with what is publicly shippable.
+
+- **QuickBuild is not publicly available.** It is a Microsoft-internal build service. It cannot be
+  part of an external story.
+- **BuildXL's own packages are not on nuget.org.** Only `win-x64` and `linux-x64` exist on the public
+  feed, and neither macOS RID has ever been published (§10.1).
+- **The public mechanism is the MSBuild project cache plugin API.** `Microsoft.Build.ProjectCache`
+  is present in MSBuild 18.9.0-preview alongside the obsolete
+  `Microsoft.Build.Experimental.ProjectCache`, and `ProjectCacheService` accepts either.
+- **MSBuild's file-access observation is Windows-and-net472 only.** It is compiled under
+  `FEATURE_REPORTFILEACCESSES`. Verified directly on this Mac:
+
+  ```
+  $ dotnet msbuild /reportfileaccesses
+  MSBUILD : error MSB1001: Unknown switch.
+  ```
+
+The consequence is a precise asymmetry: `HandleProjectFinishedAsync` is **not** gated on
+`ReportFileAccesses`, but `HandleFileAccess` and `HandleProcess` **are**. On macOS you can therefore
+*store* cache entries but cannot *observe* what to key them on.
+
+That asymmetry is the argument for the sandbox. A project cache without observation must be keyed on
+declared inputs, which is exactly the assumption that makes build caches unsound. The Endpoint
+Security broker supplies the missing half.
+
+### What the measurement says the win actually is
+
+§6 records an assumption that was wrong and worth repeating here: a comment-only edit does **not**
+force MSBuild to rebuild the downstream cone. Measured, it rebuilds 1 of 40 projects, because
+reference assemblies already solve that case. Claiming that win would have been trivially
+disprovable.
+
+The real gap is timestamp churn. When content is identical but timestamps move, MSBuild rebuilds
+**40 of 40** projects and **all 40 outputs are byte-identical** — 12.65 s against a 15.72 s cold
+build, roughly 80% of a full build, entirely wasted. That is `git checkout`, a fresh clone, and every
+CI agent. MSBuild compares timestamps and cannot do better; content-based caching can. That is the
+claim to make, and it is measured rather than asserted.
