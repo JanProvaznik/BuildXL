@@ -16,6 +16,11 @@
 #define MAC_OS_SANDBOX 0
 #endif // !defined(MAC_OS_SANDBOX)
 
+// Set when building the user-space Endpoint Security sandbox (bxl-es-broker).
+#if !defined(MAC_OS_ES_SANDBOX)
+#define MAC_OS_ES_SANDBOX 0
+#endif // !defined(MAC_OS_ES_SANDBOX)
+
 #if _WIN32
 #define __linux__ 0
 #define __APPLE__ 0
@@ -32,6 +37,8 @@
 // OSX stuff
 #if MAC_OS_SANDBOX
 #include "stdafx-mac-kext.h"
+#elif MAC_OS_ES_SANDBOX
+#include "stdafx-mac-es.h"
 #else
 #include "stdafx-mac-interop.h"
 #endif

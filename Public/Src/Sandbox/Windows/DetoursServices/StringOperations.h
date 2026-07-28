@@ -82,12 +82,17 @@ inline PathChar NormalizePathChar(PathChar c) noexcept
     return c;
 #elif __APPLE__
 
-#if !defined(MAC_OS_LIBRARY)
-    return (PathChar)_towupper_l(c, g_invariantLocale);
-#elif  MAC_OS_LIBRARY || MAC_OS_SANDBOX
+#if MAC_OS_LIBRARY || MAC_OS_SANDBOX
     return utf8proc_toupper(c);
+#else
+    // Managed BuildXL hashes manifest paths over raw bytes with no case folding on every Unix
+    // platform, macOS included (see NormalizePathAndReturnHash in Impl.Linux.cs). Folding case here
+    // would make the native hash disagree with the manifest for any path containing a lowercase
+    // letter, so every scope lookup would miss and every access would silently fall back to the
+    // root policy instead of the policy the build actually declared.
+    return c;
 #endif
-    
+
 #endif
 }
 

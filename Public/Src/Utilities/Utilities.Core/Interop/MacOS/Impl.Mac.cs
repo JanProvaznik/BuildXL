@@ -201,11 +201,6 @@ namespace BuildXL.Interop.Unix
         [DllImport(Libraries.BuildXLInteropLibMacOS)]
         internal static extern int GetCpuLoadInfo(ref CpuLoadInfo buffer, long bufferSize);
 
-        #region Sandbox
-        [DllImport(Libraries.BuildXLInteropLibMacOS)]
-        internal static extern unsafe int NormalizePathAndReturnHash(byte[] pPath, byte* buffer, int bufferLength);
-        #endregion
-
         [DllImport(Libraries.LibC, SetLastError = true)]
         unsafe internal static extern int setxattr(
             [MarshalAs(UnmanagedType.LPStr)] string path,

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 #include "ReportBuilder.h"
 #include "ReportType.h"
@@ -170,10 +171,10 @@ int ReportBuilder::DebugReportReportString(DebugEventSeverity severity, pid_t pi
         // message (plus the \n that ends any report, hence the -1), so it's the last thing 
         // we tried to write when hitting the size limit.
         int truncated_size = strlen(message) - (report_string_len - max_report_len) - 1;
-        char truncated_message[truncated_size] = { 0 };
+        std::vector<char> truncated_message(truncated_size > 0 ? truncated_size : 1, '\0');
 
         // Let's leave an ending \0
-        strncpy(truncated_message, message, truncated_size - 1);
+        strncpy(truncated_message.data(), message, truncated_size - 1);
 
         report_string_len = snprintf(
             &buffer[prefix_len],
@@ -182,7 +183,7 @@ int ReportBuilder::DebugReportReportString(DebugEventSeverity severity, pid_t pi
             buildxl::common::ReportType::kDebugMessage,
             pid,
             (int)severity,
-            truncated_message);
+            truncated_message.data());
     }
 
     // Set the prefix with the report length

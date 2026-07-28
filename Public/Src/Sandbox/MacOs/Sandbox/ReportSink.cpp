@@ -1,0 +1,253 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+#include <vector>
+
+#include "ReportBuilder.h"
+#include "ReportSink.h"
+#include "ReportType.h"
+
+namespace buildxl {
+namespace macos {
+
+ReportSink::~ReportSink()
+{
+    Close();
+}
+
+bool ReportSink::Open(const std::string &fifoPath, std::string &errorMessage)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Blocking open: the managed side creates the FIFO and opens the read end before launching the
+    // broker, so this returns as soon as the reader is present.
+    int fd = open(fifoPath.c_str(), O_WRONLY);
+    if (fd < 0)
+    {
+        errorMessage = "Failed to open report FIFO '" + fifoPath + "': " + strerror(errno);
+        return false;
+    }
+
+    m_fd = fd;
+    return true;
+}
+
+void ReportSink::Close()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    FlushLocked();
+    if (m_fd >= 0)
+    {
+        close(m_fd);
+        m_fd = -1;
+    }
+}
+
+bool ReportSink::AttachFd(int fd)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_fd >= 0 || fd < 0)
+    {
+        return false;
+    }
+
+    m_fd = fd;
+    return true;
+}
+
+bool ReportSink::IsPathTruncated(const char *buffer, unsigned int reportLength)
+{
+    // Field 11 (zero-based index 10) of every report is the truncation flag. Reading it back is the
+    // only way to know what ReportBuilder decided: it shortens the path internally and nothing else
+    // in the return value distinguishes that from a report that happened to be long.
+    const size_t prefixLength = sizeof(unsigned int);
+    if (reportLength <= prefixLength)
+    {
+        return false;
+    }
+
+    const char *body = buffer + prefixLength;
+    const size_t bodyLength = reportLength - prefixLength;
+
+    size_t separators = 0;
+    for (size_t i = 0; i < bodyLength; i++)
+    {
+        if (body[i] != '|')
+        {
+            continue;
+        }
+
+        separators++;
+        if (separators == 10)
+        {
+            return i + 1 < bodyLength && body[i + 1] == '1';
+        }
+    }
+
+    return false;
+}
+
+bool ReportSink::WriteRaw(const char *buffer, size_t length)
+{
+    if (m_fd < 0)
+    {
+        return false;
+    }
+
+    m_pending.insert(m_pending.end(), buffer, buffer + length);
+    if (m_pending.size() < kFlushThreshold)
+    {
+        return true;
+    }
+
+    return FlushLocked();
+}
+
+bool ReportSink::Flush()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return FlushLocked();
+}
+
+bool ReportSink::FlushLocked()
+{
+    if (m_fd < 0 || m_pending.empty())
+    {
+        return m_fd >= 0;
+    }
+
+    const char *buffer = m_pending.data();
+    const size_t length = m_pending.size();
+
+    size_t written = 0;
+    while (written < length)
+    {
+        ssize_t result = write(m_fd, buffer + written, length - written);
+        if (result < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            m_writeFailures++;
+            m_pending.clear();
+            return false;
+        }
+
+        written += static_cast<size_t>(result);
+    }
+
+    m_pending.clear();
+    return true;
+}
+
+TaintReason ReportSink::WriteOneReport(buildxl::linux::SandboxEvent &event, const buildxl::linux::AccessReport &report)
+{
+    // Reused across reports. Allocating the maximum report size per access showed up as the single
+    // largest cost in the throughput benchmark; the caller already holds m_mutex, so a member buffer
+    // is safe here.
+    if (m_scratch.size() != kMaxReportLength)
+    {
+        m_scratch.resize(kMaxReportLength);
+    }
+
+    std::vector<char> &buffer = m_scratch;
+    unsigned int reportLength = 0;
+
+    // ReportBuilder writes the length prefix and shortens the path if the report does not fit.
+    if (!buildxl::linux::ReportBuilder::SandboxEventReportString(
+            event, report, buffer.data(), kMaxReportLength, reportLength))
+    {
+        m_writeFailures++;
+        return TaintReason::kReportSinkFailure;
+    }
+
+    if (!WriteRaw(buffer.data(), reportLength))
+    {
+        return TaintReason::kReportSinkFailure;
+    }
+
+    m_reportsWritten++;
+
+    if (IsPathTruncated(buffer.data(), reportLength))
+    {
+        m_truncatedPaths++;
+        return TaintReason::kPathTruncated;
+    }
+
+    return TaintReason::kNone;
+}
+
+TaintReason ReportSink::WriteSandboxEvent(buildxl::linux::SandboxEvent &event)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    TaintReason taint = TaintReason::kNone;
+
+    const buildxl::linux::AccessReport source = event.GetSourceAccessReport();
+    if (source.file_operation != buildxl::linux::FileOperation::kMax)
+    {
+        taint |= WriteOneReport(event, source);
+    }
+
+    const buildxl::linux::AccessReport destination = event.GetDestinationAccessReport();
+    if (!destination.path.empty() && destination.file_operation != buildxl::linux::FileOperation::kMax)
+    {
+        taint |= WriteOneReport(event, destination);
+    }
+
+    event.Seal();
+    return taint;
+}
+
+bool ReportSink::WriteDebugMessage(buildxl::linux::DebugEventSeverity severity, int32_t pid, const std::string &message)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (m_scratch.size() != kMaxReportLength)
+    {
+        m_scratch.resize(kMaxReportLength);
+    }
+
+    std::vector<char> &buffer = m_scratch;
+    int totalLength = buildxl::linux::ReportBuilder::DebugReportReportString(
+        severity, static_cast<pid_t>(pid), message.c_str(), buffer.data(), kMaxReportLength);
+
+    if (totalLength <= 0)
+    {
+        m_writeFailures++;
+        return false;
+    }
+
+    return WriteRaw(buffer.data(), static_cast<size_t>(totalLength));
+}
+
+bool ReportSink::WriteTaint(TaintReason taint, int32_t pid, const std::string &context)
+{
+    if (!IsTainted(taint))
+    {
+        return true;
+    }
+
+    const std::string message =
+        "[macOS sandbox] The observed file access stream for this pip is incomplete or ambiguous "
+        "(" + TaintSetToString(taint) + "). The pip cannot be cached from this execution. Context: " + context;
+
+    return WriteDebugMessage(buildxl::linux::DebugEventSeverity::kError, pid, message);
+}
+
+bool ReportSink::WriteSentinel(int32_t sentinel)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Sentinels are what unblocks the managed reader, so they are never left sitting in the buffer.
+    return WriteRaw(reinterpret_cast<const char *>(&sentinel), sizeof(sentinel)) && FlushLocked();
+}
+
+} // namespace macos
+} // namespace buildxl

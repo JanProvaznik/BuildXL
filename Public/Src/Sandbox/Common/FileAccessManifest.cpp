@@ -4,6 +4,30 @@
 #include "FileAccessManifest.h"
 #include "DataTypes.h"
 
+namespace {
+    /**
+     * Returns the last component of a path without mutating it.
+     *
+     * This matches the semantics of GNU basename() (which the Linux build picks up from <string.h>)
+     * for the inputs used here, and avoids POSIX basename() from <libgen.h>, whose signature takes a
+     * mutable char* and is allowed to modify its argument.
+     */
+    template<typename TChar>
+    const TChar *LastPathComponent(const TChar *path)
+    {
+        const TChar *lastSeparator = nullptr;
+        for (const TChar *c = path; *c != static_cast<TChar>(0); c++)
+        {
+            if (*c == static_cast<TChar>('/'))
+            {
+                lastSeparator = c;
+            }
+        }
+
+        return lastSeparator == nullptr ? path : lastSeparator + 1;
+    }
+}
+
 namespace buildxl {
 namespace common {
 
@@ -237,7 +261,7 @@ bool FileAccessManifest::ShouldBreakaway(const PathChar *path, std::basic_string
     }
 
     // Retrieve the image name (last component of the path)
-    auto imageName = std::basic_string(basename(path));
+    auto imageName = std::basic_string(LastPathComponent(path));
 
     for(auto it = breakaway_child_processes_.begin(); it != breakaway_child_processes_.end(); it++)
     {

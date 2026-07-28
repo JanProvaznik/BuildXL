@@ -16,8 +16,27 @@
     typedef std::string CanonicalizedPathType;
 #endif // _WIN32
 
-#if !(_WIN32) && !(MAC_OS_SANDBOX) && !(MAC_OS_LIBRARY)
+#if !(_WIN32) && !(MAC_OS_SANDBOX) && !(MAC_OS_LIBRARY) && !(MAC_OS_ES_SANDBOX)
     #include "bxl_observer.hpp"
+#endif
+
+#if MAC_OS_ES_SANDBOX
+namespace buildxl {
+namespace macos {
+    /**
+     * Invoked the first time a given path is checked for an allowed write while the manifest has
+     * OverrideAllowWriteForExistingFiles set, so that managed code can determine the real first
+     * write attempt. Installed by the broker at startup.
+     *
+     * The Linux sandbox reports this from inside the interposed process (see
+     * BxlObserver::report_firstAllowWriteCheck); the macOS sandbox observes out of process, so the
+     * report has to be routed back through the broker's report sink instead.
+     *
+     * CODESYNC: Public/Src/Sandbox/MacOs/Sandbox/ReportSink.cpp
+     */
+    extern void (*g_report_first_allow_write_check)(const char *path);
+}
+}
 #endif
 
 // Result of determining an access policy for a path. This involves canonicalizing the desired path and performing a policy lookup.

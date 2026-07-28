@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using static BuildXL.Interop.Dispatch;
-
 #pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
 
 namespace BuildXL.Interop.Unix
@@ -12,19 +10,19 @@ namespace BuildXL.Interop.Unix
     /// </summary>
     public static class Sandbox
     {
-        public static unsafe int NormalizePathAndReturnHash(byte[] pPath, byte[] normalizedPath)
+        /// <summary>
+        /// Normalizes a path and returns its manifest hash.
+        /// </summary>
+        /// <remarks>
+        /// macOS used to route this into the native sandbox library, which was removed along with the
+        /// kernel extension; the export no longer exists, so calling it now throws at runtime. The
+        /// managed implementation is byte-identical to what the native side computes on every Unix
+        /// platform, so both macOS and Linux use it directly.
+        /// CODESYNC: NormalizePathChar in Public/Src/Sandbox/Windows/DetoursServices/StringOperations.h
+        /// </remarks>
+        public static int NormalizePathAndReturnHash(byte[] pPath, byte[] normalizedPath)
         {
-            if (IsMacOS)
-            {
-                fixed (byte* outBuffer = &normalizedPath[0])
-                {
-                    return Impl_Mac.NormalizePathAndReturnHash(pPath, outBuffer, normalizedPath.Length);
-                }
-            }
-            else
-            {
-                return Impl_Linux.NormalizePathAndReturnHash(pPath, normalizedPath);
-            }
+            return Impl_Linux.NormalizePathAndReturnHash(pPath, normalizedPath);
         }
 
         /// <summary>

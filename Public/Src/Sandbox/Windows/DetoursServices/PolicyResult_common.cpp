@@ -173,7 +173,7 @@ AccessCheckResult PolicyResult::CheckDirectoryAccess(bool enforceCreationAccess)
 
 // Allow write based on file existence is only implemented for Windows and Linux. On mac we just make decisions based
 // on the configued policy
-#if !(_WIN32) && !(MAC_OS_SANDBOX) && !(MAC_OS_LIBRARY)
+#if !(_WIN32) && !(MAC_OS_SANDBOX) && !(MAC_OS_LIBRARY) && !(MAC_OS_ES_SANDBOX)
 bool PolicyResult::AllowWrite(bool basedOnlyOnPolicy) const {
 
     bool isWriteAllowedByPolicy = (m_policy & FileAccessPolicy_AllowWrite) != 0;
@@ -195,6 +195,31 @@ bool PolicyResult::AllowWrite(bool basedOnlyOnPolicy) const {
             // the perspective of the running process. These special report lines are then processed outside of detours to determine the real first write attempt
             // Observe this implies that in this case we never block accesses on detours based on file existence, but generate a DFA on managed code
             BxlObserver::GetInstance()->report_firstAllowWriteCheck(Path());
+        }
+    }
+
+    return isWriteAllowedByPolicy;
+}
+#elif MAC_OS_ES_SANDBOX
+namespace buildxl {
+namespace macos {
+    void (*g_report_first_allow_write_check)(const char *path) = nullptr;
+}
+}
+
+bool PolicyResult::AllowWrite(bool basedOnlyOnPolicy) const {
+    // Keep this in lockstep with the Linux implementation above; the only difference is where the
+    // first-allow-write-check report is emitted from. The broker observes the whole process tree of
+    // a single pip, so FilesCheckedForAccess (a per-process singleton) has exactly the intended
+    // per-pip lifetime here.
+    bool isWriteAllowedByPolicy = (m_policy & FileAccessPolicy_AllowWrite) != 0;
+
+    if (!basedOnlyOnPolicy && !IndicateUntracked() && isWriteAllowedByPolicy && OverrideAllowWriteForExistingFiles()) {
+        FilesCheckedForAccess* filesCheckedForWriteAccess = FilesCheckedForAccess::GetInstance();
+
+        if (filesCheckedForWriteAccess->TryRegisterPath(m_canonicalizedPath)
+            && buildxl::macos::g_report_first_allow_write_check != nullptr) {
+            buildxl::macos::g_report_first_allow_write_check(Path());
         }
     }
 
