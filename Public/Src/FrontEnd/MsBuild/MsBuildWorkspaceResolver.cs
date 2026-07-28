@@ -374,14 +374,21 @@ namespace BuildXL.FrontEnd.MsBuild
             }
         }
 
+        /// <summary>
+        /// The dotnet host is called 'dotnet.exe' on Windows and 'dotnet' everywhere else.
+        /// </summary>
+        private static string DotNetHostName => OperatingSystemHelper.IsWindowsOS ? "dotnet.exe" : "dotnet";
+
         private bool TryFindDotNetExe(IEnumerable<AbsolutePath> dotnetSearchLocations, out AbsolutePath dotnetExeLocation, out string failure)
         {
             dotnetExeLocation = AbsolutePath.Invalid;
             failure = string.Empty;
 
+            string dotnetHostName = DotNetHostName;
+
             foreach (AbsolutePath location in dotnetSearchLocations)
             {
-                AbsolutePath dotnetExeCandidate = location.Combine(Context.PathTable, "dotnet.exe");
+                AbsolutePath dotnetExeCandidate = location.Combine(Context.PathTable, dotnetHostName);
                 if (Host.Engine.FileExists(dotnetExeCandidate))
                 {
                     dotnetExeLocation = dotnetExeCandidate;
@@ -390,7 +397,7 @@ namespace BuildXL.FrontEnd.MsBuild
             }
 
             string searchLocationsStr = string.Join(", ", dotnetSearchLocations.Select(location => location.ToString(Context.PathTable)));
-            failure = $"Cannot find dotnet.exe. This is required because the dotnet core version of MSBuild was specified to run. Searched locations: [{searchLocationsStr}]";
+            failure = $"Cannot find {dotnetHostName}. This is required because the dotnet core version of MSBuild was specified to run. Searched locations: [{searchLocationsStr}]";
             return false;
         }
 
