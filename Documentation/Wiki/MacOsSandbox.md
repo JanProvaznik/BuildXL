@@ -861,6 +861,12 @@ rather than passing silently on a missing file.
 That closes the loop §10.6 described: nothing in this change set is now taken on trust from a green
 compile.
 
+One thing CI still cannot do: run the sandbox self test. GitHub's hosted macOS runners are `macos-26`,
+and `es_new_descendants_client` — the API the whole design rests on (§2) — arrived in macOS 27. The
+broker does not compile against a macOS 26 SDK, by construction rather than by accident. The self test
+therefore runs as a pip on a developer's machine (§12.3) and will run in CI the moment macOS 27 runners
+exist, with no change needed.
+
 ### 12.7 What remains
 
 | Blocker | Nature | Who can fix it |
