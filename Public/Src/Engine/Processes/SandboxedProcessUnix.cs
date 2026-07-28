@@ -790,8 +790,15 @@ namespace BuildXL.Processes
                             }
                         }
 
-                        // ignore accesses to libDetours.so, because we injected that library
-                        if (reportPath == SandboxConnectionLinuxDetours.DetoursLibFile)
+                        // Ignore accesses to libDetours.so, because we injected that library.
+                        // The Linux guard is not cosmetic: merely naming SandboxConnectionLinuxDetours runs its
+                        // static constructor, which resolves libDetours.so out of the deployment and throws when it
+                        // is absent. Only the interpose sandbox injects that library, so macOS does not deploy it,
+                        // and an unguarded reference here turns the first file access report of every macOS pip
+                        // into a TypeInitializationException inside the report-processing block. The pip then waits
+                        // for a root-process exit that can no longer be delivered and dies of its timeout, which is
+                        // as far from the real cause as a failure can get.
+                        if (OperatingSystemHelper.IsLinuxOS && reportPath == SandboxConnectionLinuxDetours.DetoursLibFile)
                         {
                             return;
                         }
