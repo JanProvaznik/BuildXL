@@ -66,6 +66,15 @@ enum class TaintReason : uint32_t
 
     /** The report sink could not write a report. */
     kReportSinkFailure = 1u << 14,
+
+    /**
+     * The broker was asked to terminate before the observed tree finished.
+     *
+     * BuildXL sends SIGTERM when it cancels or times out a pip. The broker still writes a complete,
+     * well-formed report stream in that case, but what it observed is by definition a prefix of what
+     * the pip would have done, so it must never be mistaken for a complete observation.
+     */
+    kBrokerTerminated = 1u << 15,
 };
 
 inline TaintReason operator|(TaintReason a, TaintReason b)

@@ -74,6 +74,20 @@ namespace Test.BuildXL.TestUtilities.Xunit
                 }
             }
 
+            if (OperatingSystemHelper.IsMacOS)
+            {
+                switch (sandboxKind)
+                {
+                    case SandboxKind.Default:
+                    case SandboxKind.MacOsEndpointSecurity:
+                        return new SandboxConnectionMacOs(FailureCallback, isInTestMode: true);
+                    case SandboxKind.None:
+                        return null;
+                    default:
+                        throw new Exception($"Incompatible sandbox. Requested {sandboxKind} on macOS");
+                }
+            }
+
             return null;
         }
 

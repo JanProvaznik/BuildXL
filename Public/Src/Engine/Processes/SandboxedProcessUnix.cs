@@ -396,7 +396,7 @@ namespace BuildXL.Processes
             // including orphaned processes. This is because the runner needs to be kept alive to get the reports
             // from these potential orphans. On the other hand, interpose does not wrap the root process in a runner,
             // so OS process tree ending matches the exit from the process executor.
-            if (SandboxConnection.Kind == SandboxKind.LinuxEBPF)
+            if (SandboxConnection.Kind.WrapsRootProcessInSupervisor())
             {
                 // Just wait for the root process to finish, which is signaled by the task, considering a potential timeout.
                 LogDebug($"GetReportsAsync: Waiting for root process {ProcessId} to finish.");
@@ -447,7 +447,7 @@ namespace BuildXL.Processes
             // and ensuring that it is killed (if appropriate)
             // Observe that querying 'Killed' here is racy since the process may be in the process of being killed. We need to make sure
             // that the process is no longer alive before returning from this method since we are going to query the exit code for returning the result.
-            if (SandboxConnection.Kind == SandboxKind.LinuxEBPF && !Process.HasExited)
+            if (SandboxConnection.Kind.WrapsRootProcessInSupervisor() && !Process.HasExited)
             {
                 LogDebug($"GetReportsAsync: Waiting for process tree {ProcessId} to finish.");
                 await WaitForExitAndEnsureKilledAsync();

@@ -114,6 +114,22 @@ std::string MakeNoncePath()
  * this process group, then reports whether it reached a genuinely quiescent state. That answer feeds
  * the closure evaluation - a tree that never quiesced cannot be proven complete, so it taints.
  */
+/**
+ * Set from a signal handler when BuildXL asks the broker to stop.
+ *
+ * BuildXL cancels or times out a pip by sending SIGTERM to the process it launched, which is this
+ * broker. Dying on the spot would leave the report FIFO without its end-of-reports sentinel, and the
+ * managed reader would have to treat a truncated stream as the end of the pip. Catching the signal
+ * instead lets the broker run its normal shutdown -- close the stream, taint, write the sentinels --
+ * so what BuildXL receives is complete and explicitly marked as a partial observation.
+ */
+volatile sig_atomic_t g_terminationRequested = 0;
+
+void OnTerminationSignal(int)
+{
+    g_terminationRequested = 1;
+}
+
 bool WaitForTree(pid_t rootPid, std::chrono::seconds timeout, int &exitCode)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -131,6 +147,16 @@ bool WaitForTree(pid_t rootPid, std::chrono::seconds timeout, int &exitCode)
 
         if (result < 0 && errno == EINTR)
         {
+            if (g_terminationRequested)
+            {
+                // Pass the signal on to the whole tree rather than just the root: the point of the
+                // process group is that orphans are reachable, and leaving them running would hold
+                // the ES client open after this pip is done.
+                kill(-rootPid, SIGTERM);
+                exitCode = 128 + SIGTERM;
+                return false;
+            }
+
             continue;
         }
 
@@ -144,6 +170,12 @@ bool WaitForTree(pid_t rootPid, std::chrono::seconds timeout, int &exitCode)
     // timeout means the tree did not quiesce and the stream cannot be proven complete.
     while (std::chrono::steady_clock::now() < deadline)
     {
+        if (g_terminationRequested)
+        {
+            kill(-rootPid, SIGTERM);
+            return false;
+        }
+
         const pid_t result = waitpid(-rootPid, &status, WNOHANG);
         if (result > 0)
         {
@@ -278,6 +310,16 @@ int main(int argc, char **argv)
         Fail("the Endpoint Security stream did not deliver the baseline marker");
     }
 
+    // Installed before the tool exists, so a cancellation that arrives during startup is still
+    // handled by the shutdown path rather than by the default disposition. SA_RESTART is deliberately
+    // not set: the waits below need to see EINTR to notice the request.
+    struct sigaction terminationAction = {};
+    terminationAction.sa_handler = OnTerminationSignal;
+    sigemptyset(&terminationAction.sa_mask);
+    terminationAction.sa_flags = 0;
+    sigaction(SIGTERM, &terminationAction, nullptr);
+    sigaction(SIGINT, &terminationAction, nullptr);
+
     // Own process group, so the whole tree can be waited on and signalled as a unit.
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
@@ -328,7 +370,13 @@ int main(int argc, char **argv)
     engine.Shutdown();
     ingress.Stop();
 
-    const TaintReason taint = engine.Evaluate(quiesced);
+    TaintReason taint = engine.Evaluate(quiesced);
+    if (g_terminationRequested)
+    {
+        // The stream is complete and well formed, but it is a prefix of what the pip would have done.
+        // Saying so explicitly is what stops it from being mistaken for a full observation.
+        taint = taint | TaintReason::kBrokerTerminated;
+    }
     const EngineStatistics stats = engine.Statistics();
 
     if (IsTainted(taint))

@@ -6073,13 +6073,23 @@ namespace BuildXL.Scheduler
                     // Setup the sandbox connection so we can potentially execute pips later
                     if (sandboxConnection == null)
                     {
-                        // The only unix sandbox supported at the moment:
                         var sandboxKind = m_configuration.Sandbox.UnsafeSandboxConfiguration.SandboxKind;
-                        Contract.Assert(sandboxKind == SandboxKind.Default || sandboxKind == SandboxKind.LinuxDetours,
-                                        $"Unknown Unix sandbox kind: {m_configuration.Sandbox.UnsafeSandboxConfiguration.SandboxKind}");
-                        sandboxConnection = m_configuration.Sandbox.EnableEBPFLinuxSandbox
-                            ? new SandboxConnectionLinuxEBPF(SandboxFailureCallback, ebpfDaemonTask: EBPFDaemon.GetEBPFDaemonTask())
-                            : new SandboxConnectionLinuxDetours(SandboxFailureCallback);
+
+                        if (OperatingSystemHelper.IsMacOS)
+                        {
+                            Contract.Assert(sandboxKind == SandboxKind.Default || sandboxKind == SandboxKind.MacOsEndpointSecurity,
+                                            $"Unknown macOS sandbox kind: {sandboxKind}");
+                            sandboxConnection = new SandboxConnectionMacOs(SandboxFailureCallback);
+                        }
+                        else
+                        {
+                            // The only other unix sandbox supported at the moment:
+                            Contract.Assert(sandboxKind == SandboxKind.Default || sandboxKind == SandboxKind.LinuxDetours,
+                                            $"Unknown Unix sandbox kind: {sandboxKind}");
+                            sandboxConnection = m_configuration.Sandbox.EnableEBPFLinuxSandbox
+                                ? new SandboxConnectionLinuxEBPF(SandboxFailureCallback, ebpfDaemonTask: EBPFDaemon.GetEBPFDaemonTask())
+                                : new SandboxConnectionLinuxDetours(SandboxFailureCallback);
+                        }
                     }
 
                     SandboxConnection = sandboxConnection;

@@ -26,6 +26,7 @@ const char *TaintReasonName(TaintReason singleReason)
         case TaintReason::kDelegationEscape:            return "DelegationEscape";
         case TaintReason::kLifecycleNotClosed:          return "LifecycleNotClosed";
         case TaintReason::kReportSinkFailure:           return "ReportSinkFailure";
+        case TaintReason::kBrokerTerminated:            return "BrokerTerminated";
         default:                                        return "Unknown";
     }
 }

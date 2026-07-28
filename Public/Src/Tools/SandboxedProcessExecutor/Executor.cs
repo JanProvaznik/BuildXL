@@ -433,6 +433,10 @@ namespace BuildXL.SandboxedProcessExecutor
                     ? new SandboxConnectionLinuxEBPF(SandboxConnectionFailureCallback, ebpfDaemonTask: EBPFDaemon.GetEBPFDaemonTask())
                     : new SandboxConnectionLinuxDetours(SandboxConnectionFailureCallback);
             }
+            else if (OperatingSystemHelper.IsMacOS)
+            {
+                m_sandboxConnection = new SandboxConnectionMacOs(SandboxConnectionFailureCallback);
+            }
 
             info.SandboxConnection = m_sandboxConnection;
         }

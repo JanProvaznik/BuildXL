@@ -161,6 +161,10 @@ namespace BuildXL.FrontEnd.Utilities
                         ? new SandboxConnectionLinuxEBPF(sandboxConnectionFailureCallback, ebpfDaemonTask: EBPFDaemon.GetEBPFDaemonTask()) 
                         : new SandboxConnectionLinuxDetours(sandboxConnectionFailureCallback);
                 }
+                else if (OperatingSystemHelper.IsMacOS)
+                {
+                    info.SandboxConnection = new SandboxConnectionMacOs(sandboxConnectionFailureCallback);
+                }
 
                 var process = await SandboxedProcessFactory.StartAsync(info, forceSandboxing: true);
 
