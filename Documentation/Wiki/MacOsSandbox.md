@@ -138,13 +138,16 @@ not.
 | **D2. Drain throughput** | > 100k events/s | **562,556 events/s** |
 | **D3. Burst absorption** | no loss at 500× queue depth | **met**, 0 rejected |
 
-Reproduce (the suite is built from
-`Public/Src/Sandbox/MacOs/Sandbox/UnitTests/bxl-es-selftest.cpp` together with the broker sources
-and the shared Linux policy sources):
+Reproduce. The suite links `Public/Src/Sandbox/MacOs/Sandbox/UnitTests/bxl-es-selftest.cpp` against
+the broker's own engine sources and the shared Linux policy sources, so it exercises the code that
+ships rather than a copy of it. It builds and runs as part of the build (§12.3), which means these
+numbers are re-measured on every run rather than quoted from one:
 
 ```bash
-./bxl-es-selftest      # conformance + fault injection + benchmarks
+./bxl.sh --release "/f:tag='sandbox'"    # builds the broker and runs the self test
 # => 67 checks, 0 failures
+
+./bxl-es-selftest                        # or run the binary directly
 ```
 
 D2 is worth a note: the first implementation managed 14,579 events/s, which would have made the
@@ -781,6 +784,15 @@ chance of catching:
 With those fixed, BuildXL builds `libBuildXLInterop.dylib` and `bxl-es-broker` itself, for both macOS
 runtimes, in 7.75 s — verified Mach-O arm64 and x86_64 as declared. `/f:tag='macos'` selects exactly
 those four pips.
+
+The same gap applied to the self test, which had the same excuse and less justification: it is the only
+soundness check that runs without an Apple entitlement, and it was not built by any spec either, so it
+ran when somebody remembered to invoke clang by hand. It is now two pips — build, then run — and the
+run is scheduled only when the target architecture is the host's, because a cross-built binary cannot
+be executed and skipping beats depending on emulation. The self test exits non-zero on any failed
+check, so the pip failing *is* the assertion. Measured as a pip on an arm64 Mac: **67 checks, 0
+failures**, 552,651 events/s, ingress p50 42 ns / p99 167 ns, 0 events rejected. The benchmark gates in
+§4.1 are therefore re-measured by the build rather than quoted from one run.
 
 ### 12.4 The last blocker was upstream, and it is one folder
 
