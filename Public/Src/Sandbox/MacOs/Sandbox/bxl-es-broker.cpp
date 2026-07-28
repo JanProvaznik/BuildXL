@@ -39,6 +39,7 @@
 #include <string>
 #include <vector>
 
+#include "AccessChecker.h"
 #include "EsIngress.h"
 #include "Evidence.h"
 #include "FileAccessManifest.h"
@@ -57,6 +58,44 @@ constexpr const char *kSupervisionTimeoutEnvVar = "__BUILDXL_MACOS_SUPERVISION_T
 
 /** Exit code used when the broker itself fails, distinct from any plausible tool exit code. */
 constexpr int kBrokerFailureExitCode = 253;
+
+/**
+ * Reports the broker's own exit, then closes the report stream.
+ *
+ * BuildXL launches the broker, not the tool, so from the scheduler's point of view the broker *is*
+ * the pip's root process (SandboxConnectionMacOs.OverrideProcessStartInfo). For a sandbox that wraps
+ * the root process in a supervisor, SandboxedProcessUnix.GetReportsAsync will not collect a pip's
+ * reports until an exit report arrives whose pid equals the process BuildXL launched; nothing else
+ * completes that wait short of the pip timeout, so omitting it turns every pip into a stall that
+ * ends in a spurious timeout rather than in whatever actually happened.
+ *
+ * Endpoint Security cannot supply that report. The broker is deliberately outside the tracked tree
+ * (see the note where the tool is spawned), and on the early-failure paths there is no tracked tree
+ * at all. So the broker states its own exit, as the last report before the sentinels, on every path
+ * that closes the stream. Writing it while the broker is still alive is correct: the report answers
+ * "is this pip's process tree finished", and BuildXL waits for the real OS exit separately.
+ *
+ * CODESYNC: Public/Src/Engine/Processes/SandboxedProcessUnix.cs (HandleAccessReport, GetReportsAsync)
+ */
+void CloseReportStream(ReportSink &sink, const buildxl::common::FileAccessManifest *manifest, const char *brokerPath)
+{
+    buildxl::linux::SandboxEvent exitEvent = buildxl::linux::SandboxEvent::ExitSandboxEvent(
+        "exit",
+        brokerPath,
+        getpid(),
+        getppid());
+
+    if (exitEvent.IsValid())
+    {
+        exitEvent.SetRequiredPathResolution(buildxl::linux::RequiredPathResolution::kDoNotResolve);
+        buildxl::linux::AccessChecker::CheckAccessAndGetReport(manifest, exitEvent, /* basedOnPolicy */ false);
+        sink.WriteSandboxEvent(exitEvent);
+    }
+
+    sink.WriteSentinel(ReportSink::kNoActiveProcessesSentinel);
+    sink.WriteSentinel(ReportSink::kEndOfReportsSentinel);
+    sink.Close();
+}
 
 void Fail(const char *format, ...)
 {
@@ -297,9 +336,7 @@ int main(int argc, char **argv)
             buildxl::linux::DebugEventSeverity::kError,
             static_cast<int32_t>(getpid()),
             std::string("macOS sandbox could not start: ") + errorMessage);
-        sink.WriteSentinel(ReportSink::kNoActiveProcessesSentinel);
-        sink.WriteSentinel(ReportSink::kEndOfReportsSentinel);
-        sink.Close();
+        CloseReportStream(sink, &manifest, argv[0]);
         return kBrokerFailureExitCode;
     }
 
@@ -339,9 +376,7 @@ int main(int argc, char **argv)
             buildxl::linux::DebugEventSeverity::kError,
             static_cast<int32_t>(getpid()),
             std::string("macOS sandbox could not launch the tool: ") + strerror(spawnResult));
-        sink.WriteSentinel(ReportSink::kNoActiveProcessesSentinel);
-        sink.WriteSentinel(ReportSink::kEndOfReportsSentinel);
-        sink.Close();
+        CloseReportStream(sink, &manifest, argv[0]);
         return kBrokerFailureExitCode;
     }
 
@@ -387,9 +422,7 @@ int main(int argc, char **argv)
         sink.WriteTaint(taint, childPid, "macOS Endpoint Security sandbox");
     }
 
-    sink.WriteSentinel(ReportSink::kNoActiveProcessesSentinel);
-    sink.WriteSentinel(ReportSink::kEndOfReportsSentinel);
-    sink.Close();
+    CloseReportStream(sink, &manifest, argv[0]);
 
     const char *evidencePath = getenv(kEvidenceEnvVar);
     if (evidencePath != nullptr && *evidencePath != '\0')
