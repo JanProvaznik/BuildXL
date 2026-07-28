@@ -152,8 +152,17 @@ def _is_qualifier_type_annotation(text, pos):
     the canonical home of the RID unions and declares them through `interface` and `type`, so
     restricting this to the inline form would leave exactly the file that matters uncovered.
 
-    Known gap: a non-first parameter (`f(a: X, q: { ... })`) is read as a value position. No such
-    declaration exists in the repo, and the failure direction is a note rather than a false alarm.
+    Known gaps, all of which fail *safe* -- a type position downgraded to a note, never a false
+    alarm on a value position -- and none of which has any precedent in the repo:
+
+      * a non-first parameter, `f(a: X, q: { targetRuntime: ... })`
+      * an intersection member, `interface X extends Base & { targetRuntime: ... }`
+      * a non-first union member, `type T = A | { targetRuntime: ... }`
+      * an inline anonymous cast, `<{ targetRuntime: ... }>y`
+
+    The qualifier idiom here is uniformly `declare const qualifier : {...}` or a named `interface`,
+    so closing these would add pattern surface for forms nobody writes -- and pattern surface is
+    what produced the config.dsc false alarm this function was rewritten to remove.
     """
     return _opens_type_literal(text, _enclosing_brace(text, pos))
 
