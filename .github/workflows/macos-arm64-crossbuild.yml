@@ -24,6 +24,11 @@ on:
 permissions:
   contents: read
 
+# A stage 1 engine build is expensive; do not let pushes pile them up.
+concurrency:
+  group: macos-arm64-crossbuild-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Static check first: seconds, and it fails fast on an incomplete runtime identifier switch
   # before anything spends half an hour bootstrapping.
@@ -75,6 +80,16 @@ jobs:
                       /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
                       /usr/share/swift || true
           df -h /
+
+      - name: Install the Linux sandbox build dependencies
+        run: |
+          set -euo pipefail
+          # The eBPF sandbox is part of the linux-x64 deployment, so a minimal build compiles it and
+          # needs its headers. Same list the repository gives for preparing a Linux dev machine in
+          # Documentation/Wiki/LinuxDevelopment/How_to_prep_VM.md; the hosted runner ships
+          # build-essential and curl already, but none of these.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang libelf-dev zlib1g-dev libnuma-dev
 
       - name: Stage 1 - materialize the engine-only change on top of main
         run: |
