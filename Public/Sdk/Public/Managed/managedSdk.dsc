@@ -159,7 +159,7 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
     // An additional condition is that cross-targeting is not supported by ReadyToRun, so we can only compile on the given target, 
     // see https://docs.microsoft.com/en-us/dotnet/core/whats-new/dotnet-core-3-0#cross-platformarchitecture-restrictions
     if (args.runCrossgenIfSupported && 
-        Shared.supportsCrossgen(args.deploymentStyle, framework) && 
+        Shared.supportsCrossgen(args.deploymentStyle, framework, qualifier.targetRuntime) && 
         qualifier.targetRuntime === Shared.TargetFrameworks.MachineQualifier.current.targetRuntime) {
         
         // crossgen needs the runtime assemblies, not the compile ones

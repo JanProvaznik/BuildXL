@@ -54,10 +54,11 @@ export function runtimeContentProvider(runtimeVersion: Shared.RuntimeVersion): F
 }
 
 export function crossgenProvider(runtimeVersion: Shared.RuntimeVersion): Shared.CrossgenFiles {
-    // Crossgen is deliberately not extended to osx-arm64. It is an optional optimisation -- an
-    // unhandled runtime falls through to 'undefined', which callers treat as 'no crossgen available'
-    // -- and 'Microsoft.NETCore.App.Runtime.osx-arm64' is not known to carry a 'tools/crossgen'.
-    // A case pointing at a file that may not exist would turn an optimisation into a build break.
+    // Crossgen is deliberately not extended to osx-arm64: 'Microsoft.NETCore.App.Runtime.osx-arm64'
+    // is not known to carry a 'tools/crossgen', and a case pointing at a file that may not exist
+    // would turn an optimisation into a build break. Returning undefined is safe because
+    // Shared.supportsCrossgen() calls this provider with the target runtime and treats an undefined
+    // result as 'no crossgen for this runtime'.
     switch (runtimeVersion)
     {
         case "osx-x64":

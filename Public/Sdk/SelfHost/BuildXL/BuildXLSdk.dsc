@@ -181,7 +181,7 @@ export const isDotNetCore11OrGreater : boolean = qualifier.targetFramework === "
 export const isFullFramework : boolean = qualifier.targetFramework === "net472";
 
 @@public
-export const isTargetRuntimeOsx : boolean = qualifier.targetRuntime === "osx-x64" || qualifier.targetRuntime === "osx-arm64";
+export const isTargetRuntimeOsx : boolean = Shared.isMacOsRuntime(qualifier.targetRuntime);
 
 @@public
 export const isTargetRuntimeLinux : boolean = qualifier.targetRuntime === "linux-x64";

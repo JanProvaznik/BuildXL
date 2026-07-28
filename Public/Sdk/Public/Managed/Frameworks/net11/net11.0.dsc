@@ -76,9 +76,8 @@ export const framework : Shared.Framework = {
     defaultApplicationDeploymentStyle: "selfContained",
     runtimeContentProvider: runtimeContentProvider,
 
-    // No crossgenProvider: crossgen has not shipped inside the runtime packs for years, and declaring
-    // one would make Shared.supportsCrossgen() return true and then hand crossgen.dsc an undefined
-    // file set. Leaving it out states plainly that net11 does not support crossgen.
+    // No crossgenProvider: crossgen has not shipped inside the runtime packs for years. Leaving it
+    // out states plainly that net11 does not support crossgen for any runtime.
 
     conditionalCompileDefines: [
         "NET",

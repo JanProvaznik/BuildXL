@@ -49,12 +49,20 @@ export interface Framework {
 
 }
 
-/** Whether the given framework supports crossgen */
+/** Whether the given framework supports crossgen for the given runtime */
 @@public 
-export function supportsCrossgen(deploymentStyle: ApplicationDeploymentStyle, framework: Framework): boolean {
-    // crossgen is supported when the underlying framework sets a provider for it and the application deployment style is
-    // self-contained
-    return deploymentStyle === "selfContained" && framework.crossgenProvider !== undefined;
+export function supportsCrossgen(deploymentStyle: ApplicationDeploymentStyle, framework: Framework, runtimeVersion: RuntimeVersion): boolean {
+    // crossgen is supported when the application deployment style is self-contained, the underlying
+    // framework sets a provider, and that provider actually yields files for this runtime.
+    //
+    // The last condition is not redundant. A provider is a function of the runtime identifier and
+    // returns undefined for runtimes it has no crossgen for -- net8/net9/net10 do exactly that for
+    // everything except win-x64 and osx-x64. Testing only that the provider exists would report
+    // support for every runtime the framework declares, and crossgen() would then dereference the
+    // undefined result while reading JITPath.
+    return deploymentStyle === "selfContained"
+        && framework.crossgenProvider !== undefined
+        && framework.crossgenProvider(runtimeVersion) !== undefined;
 }
 
 

@@ -66,14 +66,17 @@ function getRocksDbNativeDeployablesForTargetRuntime() : File[] {
             nativeFilesToDeploy = nativeFilesToDeploy.push(nativePackage.contents.getFile(r`build/native/amd64/librocksdb.so`));
             break;
         case "osx-arm64":
-            // The RocksDbNative package is built for amd64 only ('build/native/amd64/...'); it carries no
-            // arm64 macOS dylib. Failing here with an explicit message is better than a generic
-            // 'file not found in package' error, because the fix is external to this repository:
-            // RocksDbNative has to publish 'build/native/arm64/librocksdb.dylib' first.
-            Contract.fail(
-                "RocksDbNative does not ship an osx-arm64 native library. " +
-                "Publish a RocksDbNative package containing 'build/native/arm64/librocksdb.dylib' " +
-                "and add it here before building the osx-arm64 target runtime.");
+            // The RocksDbNative package is built for amd64 only ('build/native/amd64/...') and carries no
+            // arm64 macOS dylib, so there is nothing to deploy. This must not fail: 'pkgs' below is a
+            // top-level const that spreads this array eagerly, and it is referenced by BuildXL.Scheduler,
+            // BuildXL.KeyValueStore, BuildXL.Cache.ContentStore and five other specs. Failing here would
+            // abort evaluation of the entire osx-arm64 graph -- including the cross-build that has to
+            // produce the first osx-arm64 deployment -- rather than isolating the gap to RocksDb.
+            //
+            // The consequence is bounded and loud: an osx-arm64 deployment throws DllNotFoundException
+            // the first time a component opens the local cache. The fix is external to this repository,
+            // namely publishing a RocksDbNative package containing 'build/native/arm64/librocksdb.dylib';
+            // add the case here once it exists.
             break;
         default:
             Contract.fail(`Unsupported target runtime '${qualifier.targetRuntime}' for RocksDbNative.`);

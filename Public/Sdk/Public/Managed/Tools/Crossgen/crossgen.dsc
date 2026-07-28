@@ -81,6 +81,13 @@ export function crossgen(inputArgs: Arguments) : Shared.Binary {
 
     const crossGenFiles = inputArgs.targetFramework.crossgenProvider(inputArgs.targetRuntime);
 
+    // A provider is a function of the runtime identifier and returns undefined for runtimes it has no
+    // crossgen for, so the assert above is not sufficient. Without this, a caller that skipped
+    // Shared.supportsCrossgen() fails while reading JITPath off undefined, with no indication of why.
+    Contract.assert(
+        crossGenFiles !== undefined,
+        `The framework supports crossgen, but not for the target runtime '${inputArgs.targetRuntime}'`);
+
     const args = defaultArgs(crossGenFiles.JITPath).merge<Arguments>(inputArgs);
 
     let output: PathAtom = args.outputName;

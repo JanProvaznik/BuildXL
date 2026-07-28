@@ -88,12 +88,37 @@ def check_unions():
                 continue
             line = text.count("\n", 0, m.start()) + 1
             # Type annotation with a single admissible RID: still a type position, still a failure.
-            head = text[max(0, m.start() - 400):m.start()]
-            if re.search(r'declare\s+const\s+qualifier\s*:[^;]*$', head):
+            if _is_qualifier_type_annotation(text, m.start()):
                 fail(path, line, "single-valued targetRuntime type annotation excludes osx-arm64")
             else:
                 notes.append(f"{os.path.relpath(path, ROOT)}:{line}: value position selects osx-x64 "
                              f"(no osx-arm64 counterpart; packaging decision)")
+
+
+def _is_qualifier_type_annotation(text, pos):
+    """True when `pos` sits inside the object type literal of a qualifier declaration.
+
+    Resolved by brace balance rather than by a bounded regex. Both member separators are in use in
+    this repo -- `{ configuration: "debug", targetRuntime: "osx-x64" }` and the semicolon-separated
+    form seen in BuildXL.SBOMUtilities.dsc, RuntimeContracts.dsc and rocksDbSharp.dsc -- so any
+    pattern that cannot cross a `;` would classify half the repo's qualifier declarations as value
+    positions and never fire on them.
+    """
+    depth = 0
+    i = pos - 1
+    while i >= 0:
+        c = text[i]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth == 0:
+                break
+            depth -= 1
+        i -= 1
+    if i < 0:
+        return False
+    return re.search(r'(declare\s+const\s+qualifier|export\s+declare\s+const\s+qualifier)\s*:\s*$',
+                     text[max(0, i - 200):i]) is not None
 
 
 # ---------------------------------------------------------------- check 2/3: switches & ternaries
