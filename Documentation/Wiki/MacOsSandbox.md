@@ -431,9 +431,11 @@ runtime.
 
 ### 10.5 Verification
 
-BuildXL cannot be built or run on `osx-arm64` yet — that is what this change enables — so the
-DScript here cannot be evaluated locally and CI is the verification step. This is the same caveat
-that applies to the sandbox specs and the .NET 11 change set. What *was* checked:
+BuildXL cannot be built or run on `osx-arm64` yet — that is what this change enables — and it
+cannot be built on this Mac at all, so nothing here could be evaluated locally. That gap is closed
+by `.github/workflows/macos-arm64-crossbuild.yml`, which bootstraps a public Linux runner from the
+anonymous BuildXL feed and runs the real engine against this tree; §10.6 records what that found.
+What was checked without it:
 
 | Check | Result |
 |---|---|
@@ -455,19 +457,104 @@ distinguishes *type* positions, which are correctness failures, from *value* pos
 `withQualifier({ targetRuntime: "osx-x64" })`, which are packaging decisions and are reported
 informationally.
 
-### 10.6 The bootstrap order
+Running it then found three defects that neither the static pass nor code review could have found,
+which is the strongest argument for having built the workflow at all:
 
-There is a chicken-and-egg problem worth stating plainly, because it determines the landing sequence:
+| Defect | How it presented | Why the other checks could not see it |
+|---|---|---|
+| `config.dsc` used the `"arm64"` prelude literal | `DX9234` while *parsing the configuration* — a total build failure, not a bad qualifier | `config.dsc` is type checked by the engine's prelude, not the repository's |
+| `osx-arm64` missing from `NugetFrameworkMonikers` | `DX11231` in `web.dsc`, five call sites away from the declaration | the table is C#; the static pass only read DScript |
+| new monikers registered and consumed in one change | the same `DX11231`, for every `net11.0` runtime pack | requires an engine that has already been published |
 
-1. Land the RID support (this change). Verified by Windows/Linux CI.
-2. CI cross-builds an `osx-arm64` deployment and publishes `Microsoft.BuildXL.osx-arm64`.
-3. `bxl.sh` can then bootstrap natively on a Mac, because an LKG exists for it to download.
+The first two are fixed here. The third is structural and is the subject of §10.6.
 
-Step 3 is unreachable before step 2, and step 2 is unreachable before step 1. `bxl.sh` already
-contains the macOS support needed for step 3; it maps `uname -m` to `DotNetCoreMacArm64`/`osx-arm64`
-with no Rosetta fallback, guards the `/etc/*-release` read that aborts under `set -e` on macOS, skips
-the Linux-only EBPF and runtime-validation arguments, and clears `com.apple.quarantine` from the
-bootstrapped engine so Gatekeeper does not refuse to execute it.
+### 10.6 The bootstrap order, and why this cannot land as one change
+
+This is the most consequential thing the change set uncovered, and it was found by *running* the
+build on a public Linux runner rather than by reasoning about it. Two of the three defects below
+were invisible to both the static pass and to code review, and each one would have broken `main`.
+
+BuildXL is self-hosting: the engine that constructs the pip graph is the previously published one,
+never the one in the tree being built. That engine owns two pieces of vocabulary the DScript cannot
+override.
+
+**The prelude that type checks `config.dsc` ships inside the engine.**
+`PreludeManager.GetPreludeRoot()` resolves to `<bxl-binary-dir>/Sdk.Prelude`, and it has to: the
+engine cannot know where the repository's prelude lives until it has type checked the configuration
+that declares it — `PreludeManager.cs:82-86` says exactly this. `config.dsc:31` does register the
+repo prelude, but only for the main workspace, which is why every other spec in this change may use
+new prelude vocabulary freely. `config.dsc` and the six files it reaches through `importFile` may
+not. Writing `Context.getCurrentHost().cpuArchitecture === "arm64"` there produced:
+
+```
+config.dsc(616,0): error DX9234: Failed to parse configuration:
+Operator '===' cannot be applied to types '"x64" | "x86"' and '"arm64"'.
+```
+
+The fix is to test *not x86-family* instead. `Checker.cs:15695` only requires the operands to be
+comparable in one direction, and `Context.getCurrentHost()` is a call expression rather than a
+narrowable reference, so no operand collapses to `never`. The expression is well typed under both
+the old and the new prelude, and yields `osx-x64` on an old engine and `osx-arm64` on a new one — so
+it stays correct throughout the window between landing and the first engine built from it.
+
+**`NugetFrameworkMonikers` decides what a NuGet package even *is*.**
+`KnownTargetRuntimeAtoms` decides whether `runtimes/<rid>/lib/<tfm>` assemblies count as managed
+content, and `SupportedTargetRuntimes` becomes the literal union of the generated `targetRuntime`
+qualifier on every generated package spec. `osx-arm64` was absent, so every osx-arm64 runtime pack
+was silently downgraded to an unmanaged `NugetPackage`. It did not fail where it was declared; it
+failed five call sites away:
+
+```
+Public/Sdk/SelfHost/BuildXL/web.dsc(38,21): error DX11231: Argument of type '() => NugetPackage'
+is not assignable to parameter of type '() => ManagedNugetPackage'.
+```
+
+The packages themselves were fine — all of them resolve on nuget.org at the exact versions
+declared. This is a C# table, which is precisely why the static pass missed it: it only read
+DScript. It now reads C# too, and rejects any file that enumerates the runtime identifiers without
+accounting for `osx-arm64`.
+
+**The consequence: two stages, not one.** A runtime identifier or framework moniker must exist in a
+*published* engine before any spec may reference a NuGet package under it. This is not a workaround;
+it is how the repository has always done it. .NET 10 landed in exactly two stages, three months
+apart:
+
+| Date | Commit | Content |
+|---|---|---|
+| 2026-02-28 | `c58de3fd8` | *Add net10 support for NugetSpecGenerator* — engine only |
+| 2026-05-29 | `3d62441cd` | *Add support for .net10* — the specs that consume it |
+
+So this change set should land the same way. Stage 1 is seven files, and nothing in it references
+the new vocabulary from DScript:
+
+```
+Public/Sdk/Public/Prelude/Prelude.Context.dsc              cpuArchitecture union gains "arm64"
+Public/Src/Utilities/Configuration/IHost.cs                HostCpuArchitecture gains Arm64
+Public/Src/Utilities/Configuration/Mutable/Host.cs         reports ProcessArchitecture
+Public/Src/FrontEnd/Script/Ambients/AmbientContext.cs      maps Arm64 to "arm64"
+Public/Src/FrontEnd/Nuget/NugetFrameworkMonikers.cs        registers osx-arm64 and net11.0
+Public/Src/FrontEnd/UnitTests/Nuget/NuSpecGeneratorTests.cs  the generated qualifier union
+Public/Src/IDE/Generator/CsprojFile.cs                     macOS host RID follows the architecture
+```
+
+Stage 2 is everything else. `.github/workflows/macos-arm64-crossbuild.yml` demonstrates both halves
+in a single job without waiting for a publish in between: today's public LKG builds stage 1 and
+deploys it with `--deploy-dev`, and that freshly built engine then builds the full branch with
+`--use-dev`. A green stage 1 is the evidence that the first PR is landable; a green stage 2 is the
+evidence that the second one is.
+
+The remaining sequence is unchanged, only better understood:
+
+1. Land stage 1. Verified by ordinary Windows/Linux CI, since it changes no DScript behaviour.
+2. Publish an engine containing it.
+3. Land stage 2, then cross-build and publish `Microsoft.BuildXL.osx-arm64`.
+4. `bxl.sh` bootstraps natively on a Mac, because an LKG finally exists for it to download.
+
+Step 4 is unreachable before step 3, and so on up. `bxl.sh` already contains the macOS support step 4
+needs: it maps `uname -m` to `DotNetCoreMacArm64`/`osx-arm64` with no Rosetta fallback, guards the
+`/etc/*-release` read that aborts under `set -e` on macOS, skips the Linux-only EBPF and
+runtime-validation arguments, and clears `com.apple.quarantine` from the bootstrapped engine so
+Gatekeeper does not refuse to execute it.
 
 ---
 
