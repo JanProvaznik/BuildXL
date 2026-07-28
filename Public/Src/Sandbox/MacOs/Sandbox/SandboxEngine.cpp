@@ -40,6 +40,15 @@ SandboxEngine::SandboxEngine(
       m_queue(options.queueCapacity)
 {
     m_stats.callbackNanosSamples.reserve(std::min<size_t>(m_options.maxLatencySamples, 1 << 14));
+
+    // The broker forks the pip's root process, so the root's FORK event names the broker as its
+    // parent. Anchoring it here -- before any event can be observed -- is what keeps that first fork
+    // from being reported as unmapped lineage. The anchor is synthetic, so it cannot make an
+    // unclosed tree look closed.
+    if (brokerIdentity.IsValid())
+    {
+        m_processes.AddSyntheticAncestor(brokerIdentity, "bxl-es-broker");
+    }
 }
 
 SandboxEngine::~SandboxEngine()

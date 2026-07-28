@@ -562,81 +562,11 @@ namespace BuildXL.Processes
 
                     Contract.Assert(length > 0, "No other sentinel but the one above should be posted");
 
-                    var messageStr = s_encoding.GetString(wrapper.Instance, index: 0, count: length);
-                    var message = messageStr.AsSpan().TrimEnd('\n');
-
-                    // Report format should be in sync with native code on Linux sandbox.
-                    // CODESYNC: Public/Src/Sandbox/Linux/ReportBuilder.cpp
-
-                    // 1. Report Type.
-                    var restOfMessage = message;
-                    var reportType = (ReportType)AssertInt("Report Type", nextField(restOfMessage, out restOfMessage));
-                    var report = new SandboxReportLinux()
-                    {
-                        ReportType = reportType
-                    };
-
-                    switch (reportType)
-                    {
-                        case ReportType.FileAccess:
-                        {
-                            /*
-                             * File Access Report Format: %d|%s|%d|%d|%d|%d|%d|%d|%d|%d|%s\n
-                             * 
-                             * 1. Report Type
-                             * 2. System call name
-                             * 3. File Operation
-                             * 4. Process ID
-                             * 5. Parent Process ID
-                             * 6. Error
-                             * 7. Requested Access
-                             * 8. File Access Status
-                             * 9. Report Explicitly
-                             * 10. Is Directory
-                             * 11. Is path truncated
-                             * 12. Path
-                            */
-                            report.SystemCall = s_encoding.GetString(s_encoding.GetBytes(nextField(restOfMessage, out restOfMessage).ToArray()));
-                            report.FileOperation = FileOperationLinux.ToReportedFileOperation((FileOperationLinux.Operations)AssertInt("File Operation", nextField(restOfMessage, out restOfMessage)));
-                            report.ProcessId = AssertInt("Process ID", nextField(restOfMessage, out restOfMessage));
-                            report.ParentProcessId = AssertInt("Parent Process ID", nextField(restOfMessage, out restOfMessage));
-                            report.Error = AssertInt("Error", nextField(restOfMessage, out restOfMessage));
-                            report.RequestedAccess = (RequestedAccess)AssertInt("Requested Access", nextField(restOfMessage, out restOfMessage));
-                            report.FileAccessStatus = AssertInt("File Access Status", nextField(restOfMessage, out restOfMessage));
-                            report.ExplicitlyReport = AssertInt("Explicitly Report", nextField(restOfMessage, out restOfMessage)); // explicitLogging?
-                            report.IsDirectory = AssertInt("Is Directory", nextField(restOfMessage, out restOfMessage)) != 0;
-                            report.IsPathTruncated = AssertInt("Is Path Truncated", nextField(restOfMessage, out restOfMessage)) != 0;
-                            report.Data = s_encoding.GetString(s_encoding.GetBytes(nextField(restOfMessage, out restOfMessage).ToArray()));
-
-                            if (report.FileOperation == ReportedFileOperation.ProcessExec)
-                            {
-                                // Process exec may contain a command line as well
-                                report.CommandLineArguments = s_encoding.GetString(s_encoding.GetBytes(nextField(restOfMessage, out restOfMessage).ToArray()));
-                            }
-
-                            break;
-                        }
-                        case ReportType.DebugMessage:
-                        {
-                            /*
-                             * Debug report format: %d|%d|%d|%s\n
-                             * 
-                             * 1. Report Type
-                             * 2. Process ID
-                             * 3. Severity
-                             * 4. Message
-                            */
-                            report.ProcessId = AssertInt("Process ID", nextField(restOfMessage, out restOfMessage));
-                            report.Severity = (SandboxInfraSeverity)AssertInt("Severity", nextField(restOfMessage, out restOfMessage));
-                            report.Data = s_encoding.GetString(s_encoding.GetBytes(nextField(restOfMessage, out restOfMessage).ToArray())).Replace('!', '|');
-
-                            break;
-                        }
-                        default:
-                            break;
-                    }
-
-                    Contract.Assert(restOfMessage.IsEmpty, $"Rest of message: {restOfMessage.ToString()}");  // We should have reached the end of the message
+                    // CODESYNC: Public/Src/Sandbox/Linux/ReportBuilder.cpp. The parser is shared with the macOS
+                    // sandbox connection, which consumes the exact same wire format.
+                    var report = SandboxReportParser.Parse(
+                        SandboxReportParser.Decode(wrapper.Instance, length).AsSpan(),
+                        LogError);
 
                     // update active processes
                     if (report.FileOperation == ReportedFileOperation.Process)
@@ -667,22 +597,6 @@ namespace BuildXL.Processes
                     // post the AccessReport
                     Process.PostAccessReport(report);
                 }
-
-                // Reads next field of the serialized message, i.e. split on the first | and return both parts
-                static ReadOnlySpan<char> nextField(ReadOnlySpan<char> message, out ReadOnlySpan<char> rest)
-                {
-                    for (int i = 0; i < message.Length; i++)
-                    {
-                        if (message[i] == '|')
-                        {
-                            rest = i + 1 == message.Length ? ReadOnlySpan<char>.Empty : message.Slice(i + 1); // Defend against | being the last character, although we don't expect this
-                            return message.Slice(0, i);
-                        }
-                    }
-
-                    rest = ReadOnlySpan<char>.Empty;
-                    return message;
-                }
             }
 
             private bool IgnoreLinuxSpecificReports(string path)
@@ -695,23 +609,6 @@ namespace BuildXL.Processes
                 }
 
                 return false;
-            }
-
-            private uint AssertInt(string fieldName, ReadOnlySpan<char> str)
-            {
-#if NETCOREAPP
-                if (uint.TryParse(str, out uint result))
-#else // .NET 472 - no ReadOnlySpan<char> overloads. We don't really care about perf for .NET472 here
-                if (uint.TryParse(str.ToString(), out uint result))
-#endif
-                {
-                    return result;
-                }
-                else
-                {
-                    LogError($"Could not parse int from '{str.ToString()}' for field '{fieldName}'");
-                    return 0;
-                }
             }
         }
 

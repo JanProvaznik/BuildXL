@@ -167,6 +167,22 @@ bool WaitForTree(pid_t rootPid, std::chrono::seconds timeout, int &exitCode)
     return false;
 }
 
+// CODESYNC: Public/Src/Sandbox/Windows/DetoursServices/DataTypes.h (ManifestDebugFlag_t)
+// A release-mode manifest starts with the 32-bit word 0xDB600000.
+bool LooksLikeReleaseManifest(const std::vector<char> &bytes)
+{
+    constexpr uint32_t kReleaseManifestDebugFlag = 0xDB600000;
+
+    if (bytes.size() < sizeof(uint32_t))
+    {
+        return false;
+    }
+
+    uint32_t flag = 0;
+    memcpy(&flag, bytes.data(), sizeof(flag));
+    return flag == kReleaseManifestDebugFlag;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -192,7 +208,24 @@ int main(int argc, char **argv)
         return kBrokerFailureExitCode;
     }
 
-    buildxl::common::FileAccessManifest manifest(famBytes.data(), famBytes.size());
+    // The shared parser asserts (and in a build with NDEBUG, silently walks off the end) when handed
+    // a blob that is not a manifest. A truncated or half-written manifest file is a realistic failure,
+    // so check the leading debug-flag word here and turn it into an actionable message rather than an
+    // abort trap with no context.
+    if (!LooksLikeReleaseManifest(famBytes))
+    {
+        Fail("the file at '%s' is not a valid release-mode file access manifest (%zu bytes)",
+             famPathRaw,
+             famBytes.size());
+        return kBrokerFailureExitCode;
+    }
+
+    // FileAccessManifest takes ownership of the payload and frees it with delete[], so it must be
+    // handed a buffer allocated with new[] -- not the storage of a std::vector, which would then be
+    // freed twice. CODESYNC: Public/Src/Sandbox/Linux/bxl_observer.cpp does the same thing.
+    char *famPayload = new char[famBytes.size()];
+    memcpy(famPayload, famBytes.data(), famBytes.size());
+    buildxl::common::FileAccessManifest manifest(famPayload, famBytes.size());
 
     int reportPathLength = 0;
     const char *reportPath = manifest.GetReportsPath(&reportPathLength);
@@ -270,8 +303,11 @@ int main(int argc, char **argv)
         return kBrokerFailureExitCode;
     }
 
-    engine.RegisterRoot(ProcessIdentity{childPid, 0}, argv[1]);
-
+    // Deliberately no explicit root registration here: the root process enters the process table
+    // through its own FORK event, carrying the audit-token identity ES will use for every subsequent
+    // event. Registering it from the pid that posix_spawnp returned would create a second entry that
+    // never matches (pidversion would be unknown), and would mask a genuinely lost FORK. The broker's
+    // own identity is anchored in the engine instead, so the root's fork has a mapped parent.
     std::chrono::seconds supervisionTimeout(600);
     if (const char *raw = getenv(kSupervisionTimeoutEnvVar))
     {

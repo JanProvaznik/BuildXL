@@ -47,6 +47,13 @@ struct ScenarioOptions
     EngineOptions engine;
     bool supervisionQuiesced = true;
     bool registerRoot = true;
+
+    /**
+     * Models what actually happens in production: the broker forks the pip's root process, so the
+     * root enters the process table through a FORK event whose parent is the broker, not through an
+     * out-of-band registration.
+     */
+    bool rootEntersViaBrokerFork = false;
 };
 
 struct ScenarioResult
@@ -109,6 +116,27 @@ ScenarioResult RunScenario(const ScenarioOptions &options, buildxl::common::File
     shape.sourceRoot = kSourceRoot;
     shape.outputRoot = kOutputRoot;
     std::vector<NormalizedEvent> corpus = GenerateCorpus(shape, rootIdentity, expected);
+
+    if (options.rootEntersViaBrokerFork)
+    {
+        NormalizedEvent rootFork;
+        rootFork.op = NormOp::kFork;
+        rootFork.self = rootIdentity;
+        rootFork.parent = brokerIdentity;
+        rootFork.sourcePath = std::string(kSourceRoot) + "/tool0";
+        rootFork.messageVersion = 8;
+        rootFork.succeeded = true;
+        corpus.insert(corpus.begin(), rootFork);
+
+        NormalizedEvent rootExit;
+        rootExit.op = NormOp::kExit;
+        rootExit.self = rootIdentity;
+        rootExit.parent = brokerIdentity;
+        rootExit.sourcePath = std::string(kSourceRoot) + "/tool0";
+        rootExit.messageVersion = 8;
+        rootExit.succeeded = true;
+        corpus.push_back(rootExit);
+    }
 
     ReplaySource source(std::move(corpus), options.faults, brokerIdentity);
 
@@ -209,6 +237,59 @@ void ReportScenario(const char *name, const ScenarioResult &result)
 // ---------------------------------------------------------------------------------------------
 // Test bodies
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * Regression test for the production process-tree shape.
+ *
+ * In a real build nothing registers the root out of band: the broker forks it, so the root arrives
+ * as a FORK event whose parent is the broker. Two things previously went wrong with that shape and
+ * both were invisible to every other test here, because every other test hands the root to the
+ * engine directly:
+ *
+ *  1. The ingress decided "is this the broker's own event" from the process that *acted*, and FORK
+ *     rewrites the subject to the child -- so the root's own start event was suppressed as if the
+ *     broker had produced it, and BuildXL would never see the pip start.
+ *  2. The broker was not in the process table at all, so the root's fork had no mapped parent and
+ *     every build began with a kUnmappedLineage taint.
+ *
+ * The engine anchors the broker's identity for exactly this reason. The anchor must not, however,
+ * make an empty tree look complete, which is the third assertion below.
+ */
+static void TestRootForkedByBrokerIsTrackedWithoutTaint(buildxl::common::FileAccessManifest *manifest)
+{
+    printf("[root forked by broker]\n");
+
+    ScenarioOptions options;
+    options.shape.processCount = 8;
+    options.shape.accessesPerProcess = 12;
+    options.shape.seed = 991;
+    options.registerRoot = false;
+    options.rootEntersViaBrokerFork = true;
+
+    const ScenarioResult result = RunScenario(options, manifest);
+    ReportScenario("root forked by broker", result);
+
+    Check(!HasTaint(result.taint, TaintReason::kUnmappedLineage),
+          "a root process forked by the broker must have mapped lineage");
+    Check(!HasTaint(result.taint, TaintReason::kLifecycleNotClosed),
+          "a tree whose root arrived by fork and exited must close");
+    Check(result.missingCount == 0, "no access may be lost when the root arrives by fork");
+    Check(!result.sawErrorDebugMessage, "the production process-tree shape must not raise an infrastructure error");
+
+    // The anchor is synthetic, so on its own it must not be able to satisfy closure. Without a real
+    // observed process the tree is not closed, and that must still be reported.
+    ScenarioOptions empty;
+    empty.shape.processCount = 0;
+    empty.shape.accessesPerProcess = 0;
+    empty.shape.seed = 992;
+    empty.registerRoot = false;
+
+    const ScenarioResult emptyResult = RunScenario(empty, manifest);
+    ReportScenario("nothing observed", emptyResult);
+
+    Check(HasTaint(emptyResult.taint, TaintReason::kLifecycleNotClosed),
+          "the broker anchor alone must not make an unobserved tree look closed");
+}
 
 static void TestCleanRunReportsEverything(buildxl::common::FileAccessManifest *manifest)
 {
@@ -564,6 +645,7 @@ int main(int argc, char **argv)
     const uint64_t start = NowNanos();
 
     TestCleanRunReportsEverything(manifest.get());
+    TestRootForkedByBrokerIsTrackedWithoutTaint(manifest.get());
     TestEachFaultIsDetected(manifest.get());
     TestNewerMessageVersionWarnsButDoesNotFail(manifest.get());
     TestQueueOverflowIsDetected(manifest.get());

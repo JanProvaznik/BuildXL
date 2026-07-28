@@ -4,6 +4,8 @@
 #include "EsIngress.h"
 
 #include <bsm/libbsm.h>
+#include <mach/mach.h>
+#include <mach/task_info.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -73,6 +75,17 @@ EsIngress::EsIngress(EsIngressOptions options)
 {
     m_broker.pid = static_cast<int32_t>(getpid());
     m_broker.pidversion = 0;
+
+    // The broker's identity has to be expressed the same way ES expresses it, because it is compared
+    // against identities derived from audit tokens -- in particular it is the parent recorded on the
+    // root process's FORK event. A pid alone would not match, since ProcessIdentity compares
+    // pidversion too. TASK_AUDIT_TOKEN is the supported way to obtain one's own token.
+    audit_token_t token;
+    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+    if (task_info(mach_task_self(), TASK_AUDIT_TOKEN, reinterpret_cast<task_info_t>(&token), &count) == KERN_SUCCESS)
+    {
+        m_broker.pidversion = audit_token_to_pidversion(token);
+    }
 }
 
 EsIngress::~EsIngress()
@@ -201,8 +214,6 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
     out.parent = message->version >= 4
         ? IdentityOf(message->process->parent_audit_token)
         : ProcessIdentity{message->process->ppid, 0};
-
-    out.fromBroker = out.self.pid == m_broker.pid;
 
     if (message->action_type == ES_ACTION_TYPE_NOTIFY)
     {
@@ -540,6 +551,13 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             m_unmappedEvents.fetch_add(1, std::memory_order_relaxed);
             break;
     }
+
+    // Deliberately computed after the switch, on the event's *subject* rather than its actor. FORK
+    // rewrites `self` to the child, and the broker forking the pip's root process is precisely the
+    // event that must not be suppressed -- suppressing it would leave the process table with no root
+    // and BuildXL would never see the pip start. Events the broker performs on its own behalf (its
+    // FIFO writes) still have the broker as their subject and are still suppressed.
+    out.fromBroker = out.self.pid == m_broker.pid;
 
     return true;
 }

@@ -32,5 +32,10 @@ namespace BuildXL.Utilities.Core
         /// Linux-specific: using EBPF for tracing syscalls
         /// </summary>
         LinuxEBPF,
+
+        /// <summary>
+        /// macOS-specific: using an Endpoint Security descendants client to observe file accesses
+        /// </summary>
+        MacOsEndpointSecurity,
     }
 }

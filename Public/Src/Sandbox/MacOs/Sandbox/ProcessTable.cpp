@@ -19,9 +19,23 @@ void ProcessTable::AddRoot(const ProcessIdentity &identity, const std::string &e
     if (inserted.second)
     {
         m_liveCount++;
+        m_observedCount++;
     }
 
     m_unmapped.erase(identity);
+}
+
+void ProcessTable::AddSyntheticAncestor(const ProcessIdentity &identity, const std::string &executablePath)
+{
+    TrackedProcess anchor;
+    anchor.identity = identity;
+    anchor.parent = ProcessIdentity{};
+    anchor.executablePath = executablePath;
+    anchor.startSequence = 0;
+    anchor.alive = false;
+    anchor.synthetic = true;
+
+    m_processes.emplace(identity, anchor);
 }
 
 TaintReason ProcessTable::HandleFork(const NormalizedEvent &event)
@@ -49,6 +63,7 @@ TaintReason ProcessTable::HandleFork(const NormalizedEvent &event)
     if (inserted.second)
     {
         m_liveCount++;
+        m_observedCount++;
     }
 
     m_unmapped.erase(event.self);
@@ -134,7 +149,7 @@ std::vector<ProcessIdentity> ProcessTable::LiveProcesses() const
     std::vector<ProcessIdentity> live;
     for (const auto &entry : m_processes)
     {
-        if (entry.second.alive)
+        if (entry.second.alive && !entry.second.synthetic)
         {
             live.push_back(entry.first);
         }

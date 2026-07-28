@@ -34,6 +34,14 @@ struct TrackedProcess
 
     /** True when the process matched a breakaway rule and its accesses are intentionally not tracked. */
     bool brokeAway = false;
+
+    /**
+     * True for an entry that was inserted to anchor lineage rather than because a process was
+     * observed. The broker itself is the only such entry: it is the parent of the pip's root process,
+     * so lineage validation needs to find it, but it is not part of the pip and must not count
+     * towards liveness or towards "did we observe anything at all".
+     */
+    bool synthetic = false;
 };
 
 /**
@@ -55,6 +63,16 @@ class ProcessTable
 public:
     /** Registers the pip's root process, observed via the broker's own fork/exec of the runner. */
     void AddRoot(const ProcessIdentity &identity, const std::string &executablePath, uint64_t sequence);
+
+    /**
+     * Anchors lineage at an identity that is not part of the pip.
+     *
+     * The broker forks the pip's root process, so the root's FORK event names the broker as its
+     * parent. Without an anchor that fork has no mapped parent and every build would start with a
+     * kUnmappedLineage taint. The anchor is recorded as already-exited and flagged synthetic so it
+     * affects neither liveness nor closure.
+     */
+    void AddSyntheticAncestor(const ProcessIdentity &identity, const std::string &executablePath);
 
     /**
      * Handles a FORK event.
@@ -88,8 +106,15 @@ public:
     /** Number of processes ever seen. */
     size_t TotalCount() const { return m_processes.size(); }
 
-    /** True when every known process has been observed exiting. */
-    bool IsClosed() const { return m_liveCount == 0 && !m_processes.empty(); }
+    /**
+     * True when at least one real process was observed and every one of them has been observed
+     * exiting.
+     *
+     * The "at least one" half matters: if the root's FORK is lost, nothing real is ever recorded, and
+     * a table that is merely not-live would look closed. Synthetic anchors are excluded from both
+     * halves so that adding one can never turn an unclosed tree into a closed one.
+     */
+    bool IsClosed() const { return m_liveCount == 0 && m_observedCount > 0; }
 
     const TrackedProcess *TryGet(const ProcessIdentity &identity) const;
 
@@ -108,6 +133,7 @@ private:
     std::unordered_map<ProcessIdentity, TrackedProcess, ProcessIdentityHash> m_processes;
     mutable std::unordered_set<ProcessIdentity, ProcessIdentityHash> m_unmapped;
     size_t m_liveCount = 0;
+    size_t m_observedCount = 0;
 };
 
 } // namespace macos
