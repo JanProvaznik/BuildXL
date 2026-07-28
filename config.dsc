@@ -165,6 +165,15 @@ config({
                 // RocksDb
                 { id: "RocksDbSharp", version: "8.1.1-20241011.2", alias: "RocksDbSharpSigned" },
                 { id: "RocksDbNative", version: "8.1.1-20241011.2" },
+                // RocksDbNative above lays its native libraries out under 'build/native/amd64' and contains
+                // no arm64 macOS build, so an osx-arm64 deployment has no librocksdb.dylib and every
+                // component that opens the local cache fails at startup. This package is the upstream
+                // RocksDB distribution of the same RocksDB release (8.1.1) and does carry
+                // 'runtimes/osx-arm64/native/librocksdb.dylib'. Only that one file is consumed from it,
+                // in Public/Src/Utilities/rocksDbSharp.dsc; its managed assemblies are never referenced,
+                // so RocksDbSharp still comes from the signed package above. Remove this once RocksDbNative
+                // itself publishes an arm64 macOS binary.
+                { id: "RocksDB", version: "8.1.1.38647", alias: "RocksDbNativeOsxArm64" },
 
                 { id: "JsonDiffPatch.Net", version: "2.1.0" },
 

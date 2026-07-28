@@ -13,6 +13,9 @@ export declare const qualifier: {
 };
 
 const nativePackage = importFrom("RocksDbNative").pkg;
+// Only the arm64 macOS native library is consumed from this package; its managed assemblies are never
+// referenced, so RocksDbSharp still comes from the signed package below. See config.dsc.
+const nativePackageOsxArm64 = importFrom("RocksDbNativeOsxArm64").pkg;
 const managedPackage = importFrom("RocksDbSharpSigned").pkg;
 
 // This is meant to be used only when declaring NuGet packages' dependencies. In that particular case, you should be
@@ -66,17 +69,16 @@ function getRocksDbNativeDeployablesForTargetRuntime() : File[] {
             nativeFilesToDeploy = nativeFilesToDeploy.push(nativePackage.contents.getFile(r`build/native/amd64/librocksdb.so`));
             break;
         case "osx-arm64":
-            // The RocksDbNative package is built for amd64 only ('build/native/amd64/...') and carries no
-            // arm64 macOS dylib, so there is nothing to deploy. This must not fail: 'pkgs' below is a
-            // top-level const that spreads this array eagerly, and it is referenced by BuildXL.Scheduler,
-            // BuildXL.KeyValueStore, BuildXL.Cache.ContentStore and five other specs. Failing here would
-            // abort evaluation of the entire osx-arm64 graph -- including the cross-build that has to
-            // produce the first osx-arm64 deployment -- rather than isolating the gap to RocksDb.
+            // RocksDbNative is built for amd64 only ('build/native/amd64/...') and carries no arm64 macOS
+            // dylib, so the native library is taken from the upstream distribution of the same RocksDB
+            // release instead. Without it an osx-arm64 engine gets as far as evaluating the graph and then
+            // fails with "Failed to initialize a RocksDb store" from the memoization store, because every
+            // component that opens the local cache needs this library.
             //
-            // The consequence is bounded and loud: an osx-arm64 deployment throws DllNotFoundException
-            // the first time a component opens the local cache. The fix is external to this repository,
-            // namely publishing a RocksDbNative package containing 'build/native/arm64/librocksdb.dylib';
-            // add the case here once it exists.
+            // Note the different layout: RocksDbNative uses 'build/native/<arch>' while the upstream
+            // package uses the conventional 'runtimes/<rid>/native'. Switch back to RocksDbNative once it
+            // publishes an arm64 macOS binary.
+            nativeFilesToDeploy = nativeFilesToDeploy.push(nativePackageOsxArm64.contents.getFile(r`runtimes/osx-arm64/native/librocksdb.dylib`));
             break;
         default:
             Contract.fail(`Unsupported target runtime '${qualifier.targetRuntime}' for RocksDbNative.`);
