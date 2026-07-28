@@ -556,6 +556,93 @@ needs: it maps `uname -m` to `DotNetCoreMacArm64`/`osx-arm64` with no Rosetta fa
 runtime-validation arguments, and clears `com.apple.quarantine` from the bootstrapped engine so
 Gatekeeper does not refuse to execute it.
 
+### 10.7 Running it: four more defects that only a real Mac could find
+
+Everything above stopped at "the artifact builds". Downloading that artifact onto an Apple Silicon
+Mac and running it found four further defects, none of which is visible in source review, and each of
+which alone is enough to make macOS BuildXL unusable. They are recorded in the order they were hit,
+because the order is the point: each one hides the next.
+
+**1. arm64 macOS refuses to run a patched apphost.** Every BuildXL executable is a .NET apphost whose
+embedded dll-path placeholder is byte-patched in place by `AppHostPatcher`. The apphost ships ad-hoc
+signed by Microsoft; patching invalidates that signature while leaving the blob in place. x86_64
+macOS tolerates the mismatch, which is exactly why this never surfaced while `osx-x64` was the only
+macOS target. arm64 does not: the kernel refuses to map the image and SIGKILLs the process before any
+code runs. The whole diagnostic is `Killed: 9`, exit 137, nothing on stdout, nothing on stderr, no log
+file. `codesign -v bxl` reports `invalid signature (code or signature have been modified)`; a scan of
+the deployment found 42 Mach-O files, 11 invalid, and the 11 are precisely the patched apphosts --
+every runtime `.dylib` is correctly signed by Microsoft.
+
+Fixed in `bxl.sh` rather than in the producing build, because a macOS deployment can be cross-built on
+Linux or Windows where `codesign` does not exist; the consuming Mac is the first machine guaranteed to
+have it. Ad-hoc signing needs no identity, which matters -- this machine has none. Naive file filters
+are useless here (841 files carry the exec bit; 810 "fail" `codesign -v` only because they are `.dll`s
+and exec bits do not survive zip or NuGet delivery), so the sweep filters by extension: 93 of 1893
+files, 1.1 s, guarded by a one-call probe on `bxl` itself so the warm path costs 0.016 s. Files whose
+signature already verifies are left alone. The durable fix belongs upstream in `Microsoft.NET.HostModel`,
+whose Mach-O ad-hoc signer is pure managed code and works from any host; `AppHostPatcher` here is
+consumed from a NuGet package and cannot be fixed in this repo.
+
+**2. macOS deployments were never self-contained.** `libBuildXLInterop.dylib` is the macOS half of
+`BuildXL.Interop.Unix`, and it is not optional: `BuildXLApp`'s static constructor reaches
+`MachineInfo.CreateForCurrentMachine` -> `GetPhysicalMemorySize` -> P/Invoke. It was built by a
+separate `xcodebuild` step and copied next to the binaries by pipeline shell steps;
+`Private/InternalSdk/runtime.osx-x64.BuildXL/` seals an empty file list and no spec imports it. Linux
+has no equivalent gap. The sources are 754 lines of plain C, so clang and the Command Line Tools
+suffice, and the build now produces the dylib itself. Building it exposed a genuine macOS 26/27 SDK
+break: `mach_absolute_time` and `mach_timebase_info` are no longer reachable transitively through
+`<mach/mach.h>`, so `Dependencies.h` now includes `<mach/mach_time.h>`.
+
+Because it needs the macOS SDK, this pip is gated on a macOS host. A deployment cross-built on Linux
+therefore still arrives without it -- a documented limitation of that path, not of the change.
+
+**3. RocksDb: a comment of mine was wrong, and checking cost ten minutes.** Section 10.4 recorded
+that no arm64 macOS `librocksdb.dylib` existed, so `osx-arm64` deployed nothing and the engine died
+with `DX7136 ... Failed to initialize a RocksDb store`. It does exist: the upstream `RocksDB`
+package on nuget.org ships `runtimes/osx-arm64/native/librocksdb.dylib` for the same RocksDB release
+(8.1.1) that Microsoft's `RocksDbNative` package wraps -- verified Mach-O arm64 with 2206 `rocksdb_*`
+symbols. The two packages simply use different layouts (`build/native/<arch>` versus
+`runtimes/<rid>/native`). Only that one file is consumed; the managed assemblies still come from the
+signed Microsoft package. The gap was packaging, not availability.
+
+**4. The first file access report of every macOS pip crashed the build, ten minutes later and
+somewhere else.** `SandboxedProcessUnix.HandleAccessReport` filters out accesses to `libDetours.so`.
+Merely *naming* `SandboxConnectionLinuxDetours` to read that constant runs its static constructor,
+which resolves `libDetours.so` out of the deployment and throws when it is absent -- and macOS does
+not deploy it, because nothing on macOS injects it.
+
+The failure this produced points nowhere near its cause. The exception faults the report-processing
+block, so the process-tree-completed acknowledgement queued behind it is never handled, so the root
+process exit is never signalled, so `GetReportsAsync` waits out the default 10-minute pip timeout, and
+only then does the build die with a catastrophic-failure stack that names neither `libDetours.so` nor
+the sandbox. From the outside it is a hang. It was found by shortening the pip timeout to 25 s to
+confirm which wait was stuck, then reading the crash that followed.
+
+Two things had to be true for this to be reachable at all, which is why no Linux test covers it: the
+sandbox must not be one of the Linux ones, and it must actually deliver a file access report. Finding
+it therefore required the broker to be fixed first --
+
+**...and the fix for that is a protocol defect in the broker.** BuildXL launches the broker, not the
+tool, so the broker is the pip's root process as far as the scheduler is concerned. For any sandbox
+that wraps the root process in a supervisor, `GetReportsAsync` will not collect a pip's reports until
+an exit report arrives whose pid equals the process BuildXL launched. Endpoint Security cannot supply
+it: the broker sits outside the tracked tree by design, and on the early-failure paths there is no
+tracked tree at all. The broker now states its own exit as the last report before the sentinels, on
+every path that closes the stream. This is not a failure-path patch -- without it the *success* path
+stalls identically.
+
+#### What this adds up to
+
+A build ran. On this machine, with `/sandboxKind:none`, the `Examples/Walkthrough/HelloWorld` graph
+executed 2 process pips in **3363 ms** and produced real outputs; a second run was **100% cache hits
+in 304 ms**, an 11x speedup. That is the first BuildXL build ever executed natively on Apple Silicon,
+and it is the evidence that the runtime-identifier work is complete rather than merely plausible.
+
+The general lesson is worth stating plainly, because it recurred four times: a green cross-build
+proves that an artifact can be *produced*, and says nothing about whether it can be *run*. Every one
+of these defects was invisible to compilation, to the mechanical runtime-identifier checker, and to
+code review, and each was found within minutes of executing the thing.
+
 ---
 
 ## 11. QuickBuild and the MSBuild project cache: what is actually available
