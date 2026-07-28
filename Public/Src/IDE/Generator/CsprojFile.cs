@@ -56,7 +56,11 @@ namespace BuildXL.Ide.Generator
             }
             else if (OperatingSystemHelper.IsMacOS)
             {
-                return "osx-x64";
+                // Matches Host.CurrentCpuArchitecture: the process architecture, not the machine's, so
+                // an x64 engine under Rosetta 2 keeps generating osx-x64 projects.
+                return System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64
+                    ? "osx-arm64"
+                    : "osx-x64";
             }
 
             throw new BuildXLException("Unsupported platform for Visual Studio solution generation.");

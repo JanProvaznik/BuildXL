@@ -19,6 +19,8 @@ would violate:
   7. Download resolver ids referenced from DScript exist in config.dsc.
   8. The architecture is plumbed end to end, from HostCpuArchitecture through AmbientContext to the
      Prelude cpuArchitecture union.
+  9. No configuration-phase spec uses prelude vocabulary that the shipped engine does not have.
+ 10. No C# file enumerates the runtime identifiers without including osx-arm64.
 
 A *type* position -- a union of runtime identifiers, or a `declare const qualifier` annotation -- is a
 correctness failure when it omits osx-arm64. A *value* position such as
@@ -40,6 +42,10 @@ if len(sys.argv) > 1:
     ROOT = os.path.abspath(sys.argv[1])
 
 DELIBERATE = "not extended to osx-arm64"
+
+# Literals this change adds to the prelude. Configuration-phase specs may not use them; see
+# check_config_prelude_window.
+NEW_PRELUDE_LITERALS = {'"arm64"'}
 
 failures = []
 notes = []
@@ -345,6 +351,98 @@ def check_host_arch():
         fail(prelude, 0, "Prelude cpuArchitecture union has no arm64")
 
 
+# ------------------------------------------------- check 9: configuration-phase prelude window
+# Configuration specs are type checked against the prelude deployed *inside the running engine*
+# (PreludeManager.GetPreludeRoot -> <engine>/Sdk.Prelude), never against this repo's
+# Public/Sdk/Public/Prelude. They have to be: the engine cannot know where the repo's prelude lives
+# until it has type checked the config that declares it. config.dsc:31 registers the repo prelude,
+# but that only takes effect for the main workspace, which is why every other spec may use new
+# prelude vocabulary freely.
+#
+# The consequence is a one-release window: config.dsc is always parsed by the *previous* LKG's
+# prelude, so referencing a literal that this change introduces is a configuration parse error
+# (DX9234 / TS2365) rather than a bad qualifier -- it fails the whole build, including this change's
+# own PR validation. Found the hard way; see MacOsSandbox.md 10.6.
+def configuration_specs():
+    """config.dsc plus everything transitively reachable from it through importFile."""
+    seen, queue = set(), ["config.dsc"]
+    while queue:
+        rel = queue.pop()
+        if rel in seen:
+            continue
+        path = os.path.join(ROOT, rel)
+        if not os.path.isfile(path):
+            continue
+        seen.add(rel)
+        for m in re.finditer(r"importFile\(\s*f`([^`]+)`", read(path)):
+            queue.append(m.group(1))
+    return sorted(seen)
+
+
+def check_config_prelude_window():
+    specs = configuration_specs()
+    if "config.dsc" not in specs:
+        fail(os.path.join(ROOT, "config.dsc"), 0, "root configuration spec not found")
+        return
+    # Both operand orders, and both the strict and loose forms the checker treats alike.
+    patterns = [
+        r'cpuArchitecture\s*[=!]==?\s*("[^"]*")',
+        r'("[^"]*")\s*[=!]==?\s*[A-Za-z0-9_.()]*cpuArchitecture',
+    ]
+    for rel in specs:
+        path = os.path.join(ROOT, rel)
+        text = read(path)
+        for pattern in patterns:
+            for m in re.finditer(pattern, text):
+                if m.group(1) in NEW_PRELUDE_LITERALS:
+                    fail(path, text[:m.start()].count("\n") + 1,
+                         f"configuration-phase spec compares cpuArchitecture against {m.group(1)}, "
+                         "which the shipped engine's prelude does not declare. This is parsed by "
+                         "<engine>/Sdk.Prelude, not the repo prelude, so it is a configuration parse "
+                         'error on every engine built before this change. Test "not x86-family" '
+                         "instead.")
+    notes.append(f"{len(specs)} configuration-phase spec(s) checked against the shipped prelude")
+
+
+# ------------------------------------------------------ check 10: runtime identifier tables in C#
+# Checks 1-7 only read DScript, which is a real blind spot: the engine also carries hardcoded runtime
+# identifier tables, and those decide what the *DScript* is even allowed to say.
+# NugetFrameworkMonikers.SupportedTargetRuntimes is the worst offender -- it becomes the literal union
+# of the generated `targetRuntime` qualifier on every NuGet package, and its KnownTargetRuntimeAtoms
+# decides whether `runtimes/<rid>/lib/<tfm>` assemblies are treated as managed. Omitting a runtime
+# there does not produce a missing-case error; it silently downgrades every runtime pack for that
+# identifier to an unmanaged NugetPackage, and the failure surfaces far away as DX11231 in web.dsc.
+#
+# The rule is textual and deliberately broad: any C# file that spells out all three of the existing
+# runtime identifiers is enumerating them, so it must account for osx-arm64 too.
+def cs_files():
+    skip = {"bin", "obj", "Out", ".git", "node_modules"}
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for name in filenames:
+            if name.endswith(".cs"):
+                yield os.path.join(dirpath, name)
+
+
+def check_cs_runtime_tables():
+    required = ('"win-x64"', '"osx-x64"', '"linux-x64"')
+    scanned = 0
+    for path in cs_files():
+        text = read(path)
+        if not all(token in text for token in required):
+            continue
+        scanned += 1
+        if '"osx-arm64"' in text or DELIBERATE in text:
+            continue
+        line = text[:text.index(required[1])].count("\n") + 1
+        fail(path, line,
+             "enumerates every runtime identifier but omits osx-arm64; a runtime missing from an "
+             "engine-side table is not a compile error, it silently downgrades that runtime's NuGet "
+             "packages to unmanaged (DX11231) or picks the wrong assets")
+    if scanned:
+        notes.append(f"{scanned} C# runtime identifier table(s) checked")
+
+
 def main():
     check_unions()
     check_switches()
@@ -353,6 +451,8 @@ def main():
     check_named_qualifiers()
     check_framework_specs()
     check_host_arch()
+    check_config_prelude_window()
+    check_cs_runtime_tables()
 
     for n in notes:
         print(f"note: {n}")

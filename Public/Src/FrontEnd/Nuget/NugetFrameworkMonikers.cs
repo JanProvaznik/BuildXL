@@ -217,9 +217,22 @@ namespace BuildXL.FrontEnd.Nuget
 
             NetStandardToFullFrameworkCompatibility = new List<PathAtom>() { Net461, Net462, Net472 };
 
+            // This table is read by the *running* engine while it generates a spec for each NuGet
+            // package: KnownTargetRuntimeAtoms below decides whether `runtimes/<rid>/lib/<tfm>`
+            // assemblies count as managed content, and SupportedTargetRuntimes becomes the literal
+            // union of the generated `targetRuntime` qualifier (NugetSpecGenerator.cs).
+            //
+            // A runtime identifier therefore has to be present in an already *published* engine
+            // before any spec may reference a NuGet package under it. Registering the identifier and
+            // consuming it in the same change fails graph construction under the previous LKG with
+            // DX11231, "Argument of type '() => NugetPackage' is not assignable to parameter of type
+            // '() => ManagedNugetPackage'", because that engine classified the runtime pack as
+            // unmanaged. .NET 10 was landed in exactly these two stages: c58de3fd8 registered the
+            // moniker, and 3d62441cd added the specs that use it three months later.
             SupportedTargetRuntimes = new [] {
                 "win-x64",
                 "osx-x64",
+                "osx-arm64",
                 "linux-x64"
             };
 
