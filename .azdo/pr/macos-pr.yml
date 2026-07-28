@@ -20,6 +20,12 @@ jobs:
 
   - template: /.azdo/common/set-variable-pats.yml
 
+  # Seconds, and it runs before a build that takes tens of minutes. A missing osx-arm64 arm in a
+  # ternary chain does not necessarily fail the build; it silently falls through to whichever
+  # runtime happens to be last, so this is checked rather than left to review.
+  - script: python Shared/Scripts/validate-runtime-identifiers.py
+    displayName: 'Validate macOS Runtime Identifier Completeness'
+
   - script: >-
       bxl.cmd
       /f:output='$(Build.SourcesDirectory)\Out\Bin\Release\tests\*'
