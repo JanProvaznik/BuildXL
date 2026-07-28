@@ -35,6 +35,9 @@ function contentFilter(file: File, targetRuntime: Managed.RuntimeVersion): boole
 // The patcher runs on the *host*, so on an Apple Silicon Mac it has to be an arm64 binary: the
 // osx-x64 build in the package cannot be executed there without Rosetta 2. Cross-building for
 // macOS from Windows or Linux is unaffected, because then the host is win-x64 or linux-x64.
+// The package has to carry a tools/osx-arm64 folder for this to resolve. It is produced by
+// .azdo/publish-app-host-patcher, whose osx-arm64 leg has to run before the version in config.dsc
+// can be moved forward; until then this path fails with a DX9377 naming the missing file.
 const patcherExecutable =
     isWinOS   ? pkgContents.getFile(r`tools/win-x64/AppHostPatcher.exe`) :
     isMacOS   ? (Context.getCurrentHost().cpuArchitecture === "arm64"

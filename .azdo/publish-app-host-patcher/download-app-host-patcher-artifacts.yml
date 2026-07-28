@@ -5,6 +5,8 @@ parameters:
   type: string
 - name: macosPlatform
   type: string
+- name: macosArmPlatform
+  type: string
 - name: targetRootDirectory
   type: string
 
@@ -22,4 +24,9 @@ steps:
   - template: /.azdo/publish-app-host-patcher/download-artifacts.yml@self
     parameters:
       targetDirectory: ${{ parameters.targetRootDirectory }}/Package/tools/${{ parameters.macosPlatform }}
-      artifactName: 'apphostpatcher-${{ parameters.macosPlatform }}'  
+      artifactName: 'apphostpatcher-${{ parameters.macosPlatform }}'
+
+  - template: /.azdo/publish-app-host-patcher/download-artifacts.yml@self
+    parameters:
+      targetDirectory: ${{ parameters.targetRootDirectory }}/Package/tools/${{ parameters.macosArmPlatform }}
+      artifactName: 'apphostpatcher-${{ parameters.macosArmPlatform }}'  

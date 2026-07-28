@@ -13,6 +13,8 @@ variables:
     value: linux-x64
   - name: MacOSPlatform
     value: osx-x64
+  - name: MacOSArmPlatform
+    value: osx-arm64
   - name: BasePackageName
     value: BuildXL.Tools.AppHostPatcher
 
@@ -62,12 +64,27 @@ extends:
                 vmImage: macos-latest
               jobName: macos
 
+          # Both macOS legs run on the same image and differ only in --runtime: the tool is
+          # architecture-neutral IL, so cross-publishing it is just a matter of which runtime
+          # pack gets bundled. Without an osx-arm64 entry an Apple Silicon Mac cannot run the
+          # patcher, and every managed executable in the build is produced by it -- so BuildXL
+          # could be cross-built for osx-arm64 but never built on it.
+          - template: /.azdo/publish-app-host-patcher/build-app-host-patcher.yml@self
+            parameters:
+              platform: osx-arm64
+              pool: 
+                name: Azure Pipelines
+                os: macOs
+                vmImage: macos-latest
+              jobName: macosarm
+
           - job: Publish
             displayName: Pack and Publish AppHostPatcher Nuget Package
             dependsOn:
               - windows
               - linux
               - macos
+              - macosarm
             pool:
               name: BuildXL-DevOpsAgents-Selfhost-BuildCache
               os: windows
@@ -94,6 +111,7 @@ extends:
                   windowsPlatform: $(WindowsPlatform)
                   linuxPlatform: $(LinuxPlatform)
                   macosPlatform: $(MacOSPlatform)
+                  macosArmPlatform: $(MacOSArmPlatform)
                   targetRootDirectory: $(AppHostPatcherRootDir)
 
               - task: NuGetCommand@2

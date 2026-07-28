@@ -1,8 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <PlatformTarget>x64</PlatformTarget>
     <TargetFramework>net8.0</TargetFramework>
+    <!-- There is deliberately no PlatformTarget. It stamped the assembly's PE machine type as
+         AMD64, which made the published tool refuse to load on arm64 even though all it does is
+         search for a string in a file and overwrite it. The architecture now comes from the
+         RuntimeIdentifier that the publishing pipeline passes explicitly. -->
     <SelfContained>true</SelfContained>
   </PropertyGroup>
 </Project>

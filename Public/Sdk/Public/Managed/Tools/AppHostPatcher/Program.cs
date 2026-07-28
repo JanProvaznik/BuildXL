@@ -155,7 +155,102 @@ namespace AppHostPatcher
                 fs.Write(array, 0, array.Length);
             }
 
-            return 0;
+            return AdHocSignIfMachO(patchedAppHostPath, array);
+        }
+
+        private static bool IsMachO(byte[] image)
+        {
+            if (image.Length < 4)
+            {
+                return false;
+            }
+
+            uint magic = (uint)(image[0] | (image[1] << 8) | (image[2] << 16) | (image[3] << 24));
+
+            // MH_MAGIC / MH_CIGAM / MH_MAGIC_64 / MH_CIGAM_64, and the two fat variants.
+            return magic == 0xFEEDFACE || magic == 0xCEFAEDFE
+                || magic == 0xFEEDFACF || magic == 0xCFFAEDFE
+                || magic == 0xCAFEBABE || magic == 0xBEBAFECA
+                || magic == 0xCAFEBABF || magic == 0xBFBAFECA;
+        }
+
+        /// <summary>
+        /// Restores the ad-hoc code signature that patching the apphost in place invalidates.
+        /// </summary>
+        /// <remarks>
+        /// The apphost arrives from Microsoft.NETCore.App.Host.&lt;rid&gt; already ad-hoc signed. Overwriting the
+        /// placeholder leaves the signature blob in place but no longer matching the contents. On x86_64 macOS
+        /// the kernel tolerates that, which is why it went unnoticed for as long as osx-x64 was the only macOS
+        /// target. On arm64 it refuses to map the image and SIGKILLs the process at exec: exit code 137, nothing
+        /// on stdout or stderr. Executables that the build produces and then runs as tools -- ResXPreProcessor,
+        /// the C# compiler wrappers, every BuildXL tool -- die that way, so signing has to happen here rather
+        /// than only on the machine that consumes a finished deployment.
+        ///
+        /// Only done when running on macOS, because codesign exists nowhere else. A macOS deployment produced by
+        /// a Windows or Linux host is signed by bxl.sh on the Mac that runs it.
+        ///
+        /// The signature is applied in a temporary directory because codesign writes a .cstemp sibling of its
+        /// target before renaming it into place, and the directory the patched binary lives in is a declared
+        /// build output whose contents are checked.
+        /// </remarks>
+        private static int AdHocSignIfMachO(string patchedAppHostPath, byte[] image)
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.OSX) || !IsMachO(image))
+            {
+                return 0;
+            }
+
+            string scratchDirectory = Path.Combine(Path.GetTempPath(), "AppHostPatcher-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(scratchDirectory);
+
+            try
+            {
+                string scratchPath = Path.Combine(scratchDirectory, Path.GetFileName(patchedAppHostPath));
+                File.Copy(patchedAppHostPath, scratchPath);
+
+                var startInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "/usr/bin/codesign",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                };
+
+                startInfo.ArgumentList.Add("--force");
+                startInfo.ArgumentList.Add("--sign");
+                startInfo.ArgumentList.Add("-");
+                startInfo.ArgumentList.Add(scratchPath);
+
+                using (var process = System.Diagnostics.Process.Start(startInfo))
+                {
+                    string standardError = process.StandardError.ReadToEnd();
+                    string standardOutput = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit();
+
+                    if (process.ExitCode != 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"Failed to ad-hoc sign '{patchedAppHostPath}'. codesign exited with {process.ExitCode}." + Environment.NewLine +
+                            standardOutput + Environment.NewLine + standardError);
+                        return process.ExitCode;
+                    }
+                }
+
+                File.Delete(patchedAppHostPath);
+                File.Move(scratchPath, patchedAppHostPath);
+                return 0;
+            }
+            finally
+            {
+                try
+                {
+                    Directory.Delete(scratchDirectory, recursive: true);
+                }
+                catch (IOException)
+                {
+                    // A leftover scratch directory under TEMP is not worth failing a build over.
+                }
+            }
         }
 
         /// <nodoc />

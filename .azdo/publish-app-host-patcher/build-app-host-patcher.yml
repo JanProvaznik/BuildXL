@@ -5,6 +5,7 @@ parameters:
   - win-x64
   - linux-x64
   - osx-x64
+  - osx-arm64
 - name: pool
   type: object
 - name: jobName
@@ -35,4 +36,7 @@ jobs:
     inputs:
       command: 'build'
       projects: '$(Build.SourcesDirectory)/Public/Sdk/Public/Managed/Tools/AppHostPatcher'
-      arguments: '--configuration Release --output $(AppHostPatcherRootDir)/${{ parameters.platform }}'
+      # --runtime is not optional here. Without it a self-contained build takes its runtime
+      # identifier from the agent, so the osx-x64 leg silently started producing osx-arm64
+      # binaries the moment the macos-latest image moved to Apple Silicon.
+      arguments: '--configuration Release --runtime ${{ parameters.platform }} --output $(AppHostPatcherRootDir)/${{ parameters.platform }}'
