@@ -140,16 +140,23 @@ not.
 
 Reproduce. The suite links `Public/Src/Sandbox/MacOs/Sandbox/UnitTests/bxl-es-selftest.cpp` against
 the broker's own engine sources and the shared Linux policy sources, so it exercises the code that
-ships rather than a copy of it. It builds and runs as part of the build (§12.3), so the correctness
-rows above are re-checked whenever the engine changes. The two performance rows (D1, D2) are the
-exception, and deliberately so: they measure the machine as much as the code, and the in-build run
-competes with every other pip for the same cores, so the build measures and prints them but does not
-assert them. The numbers quoted above come from a deliberate benchmark run on an otherwise idle
-machine, which is the only setting in which a throughput floor means anything:
+ships rather than a copy of it. It builds and runs as part of the build (§12.3), but the build does
+not re-establish every row above at the scale quoted, and it is worth being exact about which:
+
+- **B, B2, D3 are re-checked in full.** They come from fixed corpora, so the in-build run is the same
+  experiment as the one that produced the result column.
+- **A is re-checked at the 2,000-scenario prefix the pip runs**, not the full 100,000. Scenarios are
+  derived from the iteration index, so the prefix is a strict subset of the same sweep — it still hits
+  all 10 fault dimensions and 43 of the 45 fault pairs, which is what catches a regression, but the
+  ≥100k target in the target column is met only by a deliberate invocation (§12.3).
+- **D1 and D2 are measured and printed by the build but never asserted by it.** They measure the
+  machine as much as the code, and the in-build run competes with every other pip for the same cores.
+  The numbers in the result column come from a deliberate benchmark run on an otherwise idle machine,
+  which is the only setting in which a throughput floor means anything.
 
 ```bash
 ./bxl.sh --release "/f:tag='sandbox'"    # builds the broker and runs the self test
-# => 65 checks, 0 failures  (the 2 perf gates run as advisories)
+# => 65 checks, 0 failures  (2,000-scenario sweep; the 2 perf gates run as advisories)
 
 ./bxl-es-selftest                        # the full 100k-scenario sweep, perf gates enforced
 # => 67 checks, 0 failures
@@ -788,7 +795,12 @@ chance of catching:
 
 With those fixed, BuildXL builds `libBuildXLInterop.dylib` and `bxl-es-broker` itself, for both macOS
 runtimes, in 7.75 s — verified Mach-O arm64 and x86_64 as declared. `/f:tag='macos'` now selects six
-pips: those four, plus the self test compile and its run, described next.
+pips: those four, plus the self test compile and its run. Six rather than seven because `broker` is
+*referenced* — `BuildXL.Processes.dsc` pulls it into the deployment at both `osx-x64` and `osx-arm64`,
+forcing the spec at both — whereas nothing references `selfTest`, so it is only evaluated at the
+spec's own default qualifier, which `config.dsc` derives from the host. That makes six a property of
+a default-qualifier build rather than of the spec: an explicit `/q:` naming both runtimes would
+compile the self test twice.
 
 The same gap applied to the self test, which had the same excuse and less justification: it is the only
 soundness check that runs without an Apple entitlement, and it was not built by any spec either, so it
@@ -804,11 +816,13 @@ The first is what it asserts. The self test's gates are not all the same kind of
 correctness gates compare what the protocol reported against what the corpus actually did, and the
 answer does not depend on the machine — those must fail the build. The throughput and latency gates
 measure the hardware and its current load at least as much as they measure the code, and this pip runs
-while the rest of the build is saturating the same cores. The effect is not hypothetical, and the two
-numbers above and below this paragraph are the demonstration: the same binary on the same machine
-reports ingress p50 42 ns / p99 84 ns run on its own, and p50 208 ns / p99 334 ns run as a pip — a 4-5×
-shift with no code change. Wiring that into the exit code buys nothing and costs a flaky build failure
-whose message is about events per second. So the pip passes
+while the rest of the build is saturating the same cores. The effect is not hypothetical. Running the
+same binary twice in one session on one idle-ish Mac, once directly and once as the pip, moves the
+ingress numbers by 4-5×: **p50 42 ns / p99 84 ns standing alone, p50 208 ns / p99 334 ns as a pip**.
+(Neither is §4.1's D1 row, which is a third run — a full-sweep benchmark. That is the point: the
+figure moves between runs of unchanged code, which is exactly what must not decide an exit code.)
+Wiring that into the exit code buys nothing and costs a flaky build failure whose message is about
+events per second. So the pip passes
 `--no-perf-gates`: the numbers are still measured and still printed into `selftest.log`, and the
 header line records which mode produced them, but only a deliberate `./bxl-es-selftest` run on a quiet
 machine can fail on them. That is the difference between 67 checks and 65.
@@ -816,9 +830,10 @@ machine can fail on them. That is the difference between 67 checks and 65.
 The second is how long it takes. The default sweep is 100,000 scenarios and took 192 s, almost all of
 it asleep: roughly one scenario in seventeen drops the closing marker on purpose, and each of those
 waits out the fence timeout. Scenarios are generated from the iteration index, so a shorter sweep is a
-prefix of the long one rather than a different sample — 2,000 scenarios still cover every individual
-fault and most pairs, which is what a per-build regression check needs, and the run drops to under
-10 s. The full sweep remains the default when the binary is invoked directly.
+prefix of the long one rather than a different sample — 2,000 scenarios still produce 1,064 faulty
+runs covering all 10 fault dimensions and 43 of the 45 fault pairs, which is what a per-build
+regression check needs, and the run drops to under 10 s. The full sweep remains the default when the
+binary is invoked directly, and §4.1's row A is stated against that.
 
 The pip is otherwise an ordinary cacheable process pip, which is the right answer and worth stating
 because it is easy to mistake for a bug: its fingerprint includes the self test binary's content hash,
