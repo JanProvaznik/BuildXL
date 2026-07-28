@@ -415,6 +415,20 @@ These are handled explicitly rather than by falling through to a wrong answer.
 | `crossgen` | **Absent from every runtime pack, not just `osx-arm64`.** Downloading `Microsoft.NETCore.App.Runtime.{win-x64,osx-x64}` at 9.0.17 and 8.0.28 and listing them shows the only entry under `tools/` is `StandardOptimizationData.mibc`; there is no `crossgen` anywhere in any of them | Not extended to `osx-arm64` — but the surrounding machinery needed a real fix. `supportsCrossgen()` tested that the *provider function* existed, which is true for every runtime on net8/9/10, rather than that it yields files for the runtime asked about; an `osx-arm64` self-contained build with `enableCrossgen=1` would have dereferenced the provider's `undefined` result. It now takes the runtime and tests the provider's result, and `crossgen()` asserts on it too. The conjunct order in `managedSdk.dsc` is now load-bearing and commented as such: the machine-qualifier test has to come *first*, because the provider resolves out of the runtime pack and would otherwise be invoked in cross-target builds that never run crossgen. Given the finding above, `enableCrossgen=1` fails on every platform today; nothing in the repo or in `.azdo` sets it. Out of scope to fix here, but recorded so the next reader does not rediscover it |
 | `BuildXL.Tools.AppHostPatcher` 2.0.0 | Ships `tools/{win-x64,osx-x64,linux-x64}` | The patcher is selected by **host** architecture and the apphost by **target**; these are different axes and were previously conflated. Cross-building `osx-arm64` from Windows or Linux works today; running the patcher natively on an arm64 Mac needs a `tools/osx-arm64` entry in that package |
 
+### 10.4b One breaking change to a published SDK signature
+
+`Sdk.Managed.Shared.supportsCrossgen()` gains a third required parameter, the runtime identifier.
+`Public/Sdk/Public` is the `SdkRoot` mount and is packed into an SDK deployment, so this is visible
+to DScript outside this repository. It is called from exactly one place in the whole repo
+(`managedSdk.dsc`), so "public" here is effectively internal.
+
+Making the parameter *optional* was considered and rejected. An omitted argument would reach the
+provider's `default: return undefined` arm and the function would quietly start returning `false`
+where it used to return `true`. For a caller that has to be updated either way, a compile error is
+the better outcome than a silent change of answer — particularly since the question the old
+signature asked ("does this framework support crossgen?") cannot be answered without knowing the
+runtime.
+
 ### 10.5 Verification
 
 BuildXL cannot be built or run on `osx-arm64` yet — that is what this change enables — so the
