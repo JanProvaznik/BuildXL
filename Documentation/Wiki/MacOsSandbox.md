@@ -297,6 +297,8 @@ The sandbox is necessary but not sufficient. Ranked, with evidence:
 | 4 | **Tests disabled on macOS** | `Public/Src/Deployment/Tests.MacOS/Tests.MacOS.dsc:22,33,36,38` — "Depends on Grpc.Core which is not supported on arm64" | Downstream of #3 |
 | 5 | **MSBuild frontend Windows assumptions** | `PipConstructor.cs:603-619` hardcodes `mspdbsrv.exe`, `vctip.exe`, `conhost.exe`, `VBCSCompiler.exe` | Breakaway-process list needs macOS equivalents |
 | 6 | **`MsBuildGraphBuilder` deploys `net472` + `dotnetcore`** | `Tool.MsBuildGraphBuilder.dsc:75-86` | Only the `dotnetcore` variant is usable on macOS; needs to be selected there |
+| 7 | **`Grpc.Tools` has no `macosx_arm64`** | Verified absent at 2.71.0 and 2.83.0; `grpc/grpc` publishes no binary release assets at all | External (grpc). Blocks a *cold* native build: the seven codegen pips cannot run, and a shared cache does not help because the tool hash is part of the fingerprint. Selection code is already in place (§12.4) |
+| 8 | **`BuildXL.Tools.AppHostPatcher` has no `tools/osx-arm64`** | `DX9377: Could not find file ... /tools/osx-arm64/AppHostPatcher` | Internal, fix written and committed; needs one run of `.azdo/publish-app-host-patcher` (§12.1) |
 
 Fixed as part of this work: `MsBuildWorkspaceResolver.TryFindDotNetExe` searched for the literal
 string `"dotnet.exe"` with no OS guard, so dotnet-core MSBuild could never be located on macOS or
@@ -685,3 +687,176 @@ The real gap is timestamp churn. When content is identical but timestamps move, 
 build, roughly 80% of a full build, entirely wasted. That is `git checkout`, a fresh clone, and every
 CI agent. MSBuild compares timestamps and cannot do better; content-based caching can. That is the
 claim to make, and it is measured rather than asserted.
+
+
+---
+
+## 12. Self-hosting: BuildXL building BuildXL on Apple Silicon
+
+§10 made `osx-arm64` a real runtime identifier and §10.7 ran a cross-built engine on a Mac. Neither
+answers the question that actually decides whether macOS is a supported platform or a port: **can the
+engine build itself, natively, on the machine a developer is sitting at?** As of §10.7 it could not
+even construct a pip graph. It can now, and the remaining failures are all one upstream package.
+
+The method throughout was the same one that produced §10.7's defects: run it, read what breaks, fix
+the cause rather than the symptom. Four rounds of that, and each round's failures were entirely
+different in kind from the last.
+
+| Round | Succeeded | Failed | What failed |
+|---|---|---|---|
+| 1 | 165 | 17 | 10 build-produced apphosts killed on start, 7 `protoc` |
+| 2 | 230 | 9 | 2 macOS native specs that nothing had ever evaluated, 7 `protoc` |
+| 3 | 232 | 7 | `protoc` only |
+| 4 | **304** | 4 | only pips needing internet access to `registry.npmjs.org` |
+
+Round 4 supplied the missing upstream binaries by hand (§12.4). 328 process pips were in the filter;
+the four that failed are the JavaScript graph builders, which run `npm install` and fail identically
+on any offline machine regardless of platform. **No failure in round 4 is attributable to macOS or to
+Apple Silicon.**
+
+### 12.1 `AppHostPatcher` could not run on an arm64 Mac, for two independent reasons
+
+Every managed executable BuildXL produces goes through `BuildXL.Tools.AppHostPatcher`, so a graph
+cannot even be evaluated without it. The published package carries `tools/{win-x64,linux-x64,osx-x64}`
+and nothing else, which is why §10 listed it as blocking the *next* step. It is worth writing down
+what was actually wrong, because "add an osx-arm64 leg to the pipeline" would not have been enough.
+
+**The assembly itself was stamped x64.** `AppHostPatcher.csproj` set `<PlatformTarget>x64</PlatformTarget>`,
+so the PE header of `AppHostPatcher.dll` said `machine = 0x8664`. An arm64 host cannot load that IL at
+all, self-contained or not:
+
+```
+System.IO.FileLoadException: The assembly architecture is not compatible with the current process
+```
+
+There is no reason for the setting — the tool reads and rewrites bytes in a file. Removing it makes
+the assembly architecture-neutral and lets the runtime identifier decide, which is what the publish
+pipeline was already parameterised on.
+
+**The publish legs never passed a runtime identifier.** `.azdo/publish-app-host-patcher` ran
+`dotnet build --configuration Release --output ...` with no `--runtime`, under `SelfContained=true`.
+Each leg therefore published whatever the agent happened to be, and was correct only by coincidence.
+That is a latent bug quite apart from arm64: the moment `macos-latest` became Apple Silicon, the leg
+labelled `osx-x64` would have silently published arm64 binaries into the `osx-x64` folder. Fixed by
+passing `--runtime ${{ parameters.platform }}` on every leg, and adding the `osx-arm64` one.
+
+### 12.2 Defect 4 again, in the form `bxl.sh` cannot reach
+
+§10.7 recorded that arm64 macOS SIGKILLs unsigned patched apphosts, and fixed it with a signing sweep
+in `bxl.sh`. That sweep repairs a *downloaded* deployment. It cannot help the build itself, because
+BuildXL patches apphosts *during* the build and immediately executes them as tools — `ResXPreProcessor`
+and friends. Those pips die with `exit code 137` and `Tool failed without writing any output stream`,
+which names neither signing nor the patcher. Ten of them in round 1, plus everything downstream.
+
+The fix belongs in the patcher, which is the only component that knows it has just written a Mach-O:
+after patching, if the host is macOS *and* the patched image has a Mach-O magic number, ad-hoc sign it.
+Both conditions matter — a Mac can cross-build for Windows, and signing a PE file is not a no-op, it is
+an error. Round 2 had zero exit-137 failures.
+
+Two details are load-bearing:
+
+- The signing happens in a temp directory and the result is moved back. `codesign` writes a `.cstemp`
+  sibling of its target, and the patched binary's directory is a declared build output whose contents
+  are checked; leaving a stray file there fails the pip.
+- Cross-builds from Linux and Windows still emit unsigned macOS binaries, so `bxl.sh`'s sweep is still
+  required for those. The durable fix is `Microsoft.NET.HostModel`'s managed Mach-O signer, but the
+  pure-managed implementation landed only recently — the version in use here shells out to `codesign`,
+  which does not exist on a Linux agent. Worth revisiting on a newer package, not before.
+
+### 12.3 Two macOS specs that nothing had ever evaluated
+
+The interop dylib and the ES broker are both built by DScript guarded on `isMacOsHost`. There was no
+macOS CI, and no Mac could construct a graph, so neither spec had ever run — they were written, reviewed,
+and committed without a single evaluation. Both were wrong, and both were wrong in ways review had no
+chance of catching:
+
+- `sandboxSourceRoot` pointed three levels up, one level too far. The spec sits in
+  `Public/Src/Sandbox/MacOs/Sandbox`, so three levels reaches `Public/Src`, not `Public/Src/Sandbox`.
+- Both specs passed their headers on the clang command line as `Artifact.input`. Naming a `.h` on a
+  clang command line does not add an include — it asks clang to *precompile* that header, which means
+  multiple outputs: `clang: error: cannot specify -o when generating multiple output files`. Headers
+  belong in `Transformer.execute`'s `dependencies`, where they are inputs for fingerprinting without
+  becoming compilation units.
+
+With those fixed, BuildXL builds `libBuildXLInterop.dylib` and `bxl-es-broker` itself, for both macOS
+runtimes, in 7.75 s — verified Mach-O arm64 and x86_64 as declared. `/f:tag='macos'` selects exactly
+those four pips.
+
+### 12.4 The last blocker was upstream, and it is one folder
+
+Rounds 2 and 3 ended with the same seven failures: `protoc`, with `ProcessStartFailure`. The cause is
+`protoc.dsc` choosing its binaries from the host *OS* with no architecture dimension at all — every
+macOS host got `tools/macosx_x64`, which on a Mac without Rosetta 2 cannot start.
+
+Making the selection architecture-aware is necessary but not sufficient, because there is nothing to
+select:
+
+- `Grpc.Tools` ships `linux_arm64` but **no `macosx_arm64`** — verified at 2.71.0 and at 2.83.0, two
+  years apart. `lipo -archs tools/macosx_x64/protoc` reports `x86_64`.
+- `Google.Protobuf.Tools` has the same gap.
+- `grpc/grpc` publishes **zero binary assets** on its GitHub releases, so there is no other official
+  source for `grpc_csharp_plugin`.
+
+Both halves are needed: of the seven pips, three use only `protoc` and four also need the C# plugin.
+
+**This is genuinely all that is left.** To prove that rather than assert it, round 4 supplied the
+missing folder: `protoc` 29.0 for `osx-aarch_64` from protobuf's own GitHub release — the exact version
+`Grpc.Tools` 2.71.0 bundles — and `grpc_csharp_plugin` 1.71.0 built for `osx-arm64`, matching
+`Grpc.Tools` 2.71.0 exactly. Repacked into a local `Grpc.Tools`, **all 31 protobuf codegen pips in the
+graph succeed natively in 3.5 s**, and the C# they generate is the same code the x64 tools produce.
+
+One mitigation that looks obvious does **not** work, and is worth recording so nobody plans around it: a
+shared content cache does not rescue these pips. A pip's fingerprint includes its tool's content hash,
+and the Linux and macOS `protoc` binaries are different files, so a macOS build cannot hit on entries a
+Linux build stored. There is no path around a native binary here.
+
+The committed change therefore asks the package what it contains rather than hard-coding today's answer:
+prefer the folder matching the host architecture, fall back to the x64 one when it is absent. Linux
+arm64 gains its native `protoc` immediately, since that folder already exists. macOS arm64 keeps exactly
+the behaviour it has today — verified: the fallback selects `tools/macosx_x64` and fails precisely as
+before — and switches to native, with no code change, the day upstream adds the folder.
+
+Note what this says about the runtime-identifier validator from §10.5: it proves every runtime-identifier
+*switch* is complete, and this predicate was not one. It tested `os` and never mentioned architecture, so
+there was nothing incomplete for the checker to find. A blind spot of exactly the shape §10's self-review
+warned about.
+
+### 12.5 Defect 7, measured
+
+§10.7 explains why the first file access report of every macOS pip took the build down ten minutes later
+and somewhere else. That fix has now been verified end to end on a cross-built engine, running
+`Examples/Walkthrough/HelloWorld` under `/sandboxKind:macOsEndpointSecurity`:
+
+| | Before | After |
+|---|---|---|
+| Time to failure | ~10 min (default pip timeout) | **1237 ms** |
+| Total wall clock | ~10 min | **3 s** |
+| What the error said | catastrophic failure naming neither the sandbox nor `libDetours.so` | the broker's own diagnostic, relayed verbatim |
+
+The pip still fails, because the entitlement is still missing (§7, blocker 1) — but it now fails in the
+way a missing entitlement should: immediately, and saying so. That is the whole difference between a bug
+and a documented external dependency.
+
+### 12.6 What is verified in CI
+
+The GitHub Actions workflow now runs three jobs, and the third is the one that matters here: a Linux
+runner bootstraps BuildXL from the public feed and cross-builds an `osx-arm64` deployment, then a **real
+Apple Silicon runner** (`macos-26-arm64`, asserted with `uname -m`) downloads it, restores the execute
+bits that artifact upload strips, and builds `HelloWorld` twice. Cold: 2/2 processes, real outputs,
+asserted on content. Warm: **2/2 cache hits, 100% cache savings**. Every assertion fails the job loudly
+rather than passing silently on a missing file.
+
+That closes the loop §10.6 described: nothing in this change set is now taken on trust from a green
+compile.
+
+### 12.7 What remains
+
+| Blocker | Nature | Who can fix it |
+|---|---|---|
+| ES entitlement | External (Apple) | Not us; gates C and E |
+| `Grpc.Tools` has no `macosx_arm64` | External (grpc) | Upstream, or a `protoc`/plugin source of our own; the selection code is already in place |
+| `BuildXL.Tools.AppHostPatcher` has no `tools/osx-arm64` | Internal, fix written | `.azdo/publish-app-host-patcher` must publish once |
+| `RocksDbNative` has no arm64 macOS dylib | External, worked around | Resolved by taking the file from the upstream `RocksDB` package (§10.7) |
+
+The AppHostPatcher entry is the only one under this repository's control, and it is a pipeline run rather
+than a code change. Everything else is either an upstream package or Apple.
