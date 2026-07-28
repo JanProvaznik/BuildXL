@@ -1,0 +1,132 @@
+# Copyright (c) Microsoft. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
+# Cross-builds the osx-arm64 deployment on a public Linux runner.
+#
+# BuildXL is self-hosting: building it requires an already-built BuildXL. The engine is published
+# for win-x64 and linux-x64 only, so an Apple Silicon Mac has no way to bootstrap -- there is no
+# osx-arm64 engine yet, and an osx-x64 one cannot run without Rosetta 2, which is not installed by
+# default and which Apple is winding down. This workflow breaks that circle from the outside: a
+# linux-x64 runner bootstraps from the anonymous public feed and cross-builds the osx-arm64 tree.
+#
+# It also gives external contributors a way to validate macOS changes. The ADO pipelines under
+# .azdo/ need Microsoft-internal pools and feeds; this needs neither.
+
+name: macOS arm64 cross-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'dev/**'
+      - 'janprovaznik-sturdy-enigma'
+
+permissions:
+  contents: read
+
+jobs:
+  # Static check first: seconds, and it fails fast on an incomplete runtime identifier switch
+  # before anything spends half an hour bootstrapping.
+  validate-runtime-identifiers:
+    name: Validate runtime identifier completeness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 Shared/Scripts/validate-runtime-identifiers.py
+
+  # Graph construction only. This evaluates every .dsc under the osx-arm64 qualifier -- type
+  # unions, switch arms, package references, download declarations -- without executing any pip,
+  # so it is the cheapest complete test of the DScript.
+  evaluate:
+    name: Evaluate osx-arm64 pip graph
+    needs: validate-runtime-identifiers
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          set -x
+          # The runner ships ~30 GB of toolchains this build never touches. Removing them keeps
+          # the NuGet cache and Out/ from filling the disk. dotnet is deliberately kept: bxl.sh
+          # uses it to restore the bootstrap package.
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
+                      /usr/share/swift || true
+          df -h /
+
+      - name: Bootstrap and evaluate
+        run: |
+          set -euo pipefail
+          # No --internal: this is an external build, so bxl.sh reads BuildXLLkgVersionPublic.cmd
+          # and pulls the engine from the anonymous mseng/PipelineTools/BuildXL.External feed.
+          bash bxl.sh \
+            --shared-comp \
+            /q:ReleaseDotNetCoreMacArm64 \
+            /phase:Evaluate \
+            /logsDirectory:Out/Logs/EvaluateOsxArm64 \
+            /forceAddExecutionPermission- \
+            /logOutput:FullOutputOnWarningOrError
+
+      - name: Upload evaluation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-evaluate-osx-arm64
+          path: Out/Logs/**
+          retention-days: 7
+          if-no-files-found: warn
+
+  crossbuild:
+    name: Cross-build osx-arm64 deployment
+    needs: evaluate
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
+                      /usr/share/swift || true
+          df -h /
+
+      - name: Cross-build the osx-arm64 tree
+        run: |
+          set -euo pipefail
+          bash bxl.sh \
+            --shared-comp \
+            --release \
+            /q:ReleaseDotNetCoreMacArm64 \
+            "/f:output='$PWD/Out/Bin/Release/osx-arm64/*'" \
+            /logsDirectory:Out/Logs/BuildOsxArm64 \
+            /forceAddExecutionPermission- \
+            /logOutput:FullOutputOnWarningOrError
+
+      - name: Show what was produced
+        if: always()
+        run: |
+          echo "=== osx-arm64 deployment ==="
+          ls -la Out/Bin/Release/osx-arm64/ 2>/dev/null | head -40 || echo "(absent)"
+          du -sh Out/Bin/Release/osx-arm64 2>/dev/null || true
+
+      - name: Upload osx-arm64 deployment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildxl-osx-arm64
+          path: Out/Bin/Release/osx-arm64/**
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-crossbuild-osx-arm64
+          path: Out/Logs/**
+          retention-days: 7
+          if-no-files-found: warn
