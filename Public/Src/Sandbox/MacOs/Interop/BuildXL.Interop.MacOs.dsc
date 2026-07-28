@@ -68,7 +68,6 @@ namespace InteropLibrary {
         const args : Argument[] = [
             Cmd.option("-o ", Artifact.output(outFile)),
             Cmd.args(sources.map(Artifact.input)),
-            Cmd.args(headers.map(Artifact.input)),
             Cmd.argument("-dynamiclib"),
             Cmd.option("-arch ", targetArchitecture),
             Cmd.argument(`-mmacosx-version-min=${minimumOsVersion}`),
@@ -84,6 +83,11 @@ namespace InteropLibrary {
             tool: clangTool,
             workingDirectory: outDir,
             arguments: args,
+            // Headers are dependencies rather than command line inputs: naming a .h on a clang
+            // command line asks it to precompile that header, which makes the invocation produce
+            // more than one output and fails with "cannot specify -o when generating multiple
+            // output files".
+            dependencies: headers,
             tags: ["compile", "macos", "interop"],
         });
 

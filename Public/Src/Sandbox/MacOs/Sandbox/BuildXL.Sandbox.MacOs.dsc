@@ -22,7 +22,9 @@ namespace EndpointSecuritySandbox {
     };
 
     const sandboxRoot = d`.`;
-    const sandboxSourceRoot = d`../../..`;
+    // This spec lives in Public/Src/Sandbox/MacOs/Sandbox, so two levels up is Public/Src/Sandbox,
+    // which is where the Linux, Common and Windows sources it shares actually live.
+    const sandboxSourceRoot = d`../..`;
 
     /**
      * The broker deliberately shares the Linux sandbox's policy engine and report writer rather than
@@ -95,7 +97,6 @@ namespace EndpointSecuritySandbox {
         const args : Argument[] = [
             Cmd.option("-o ", Artifact.output(outFile)),
             Cmd.args([...sharedSources, ...brokerSources].map(Artifact.input)),
-            Cmd.args(headers.map(Artifact.input)),
             Cmd.option("-arch ", targetArchitecture),
             Cmd.argument("-std=c++17"),
             // Endpoint Security's client handler is a block, so blocks must be enabled.
@@ -115,6 +116,11 @@ namespace EndpointSecuritySandbox {
             tool: clangTool,
             workingDirectory: outDir,
             arguments: args,
+            // Headers are dependencies rather than command line inputs: naming a .h on a clang
+            // command line asks it to precompile that header, which makes the invocation produce
+            // more than one output and fails with "cannot specify -o when generating multiple
+            // output files".
+            dependencies: headers,
             tags: ["compile", "macos", "sandbox"],
         });
 
