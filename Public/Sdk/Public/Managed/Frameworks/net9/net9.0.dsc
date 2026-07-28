@@ -59,10 +59,6 @@ export function crossgenProvider(runtimeVersion: Shared.RuntimeVersion): Shared.
     // 'tools/' is StandardOptimizationData.mibc -- so reaching either one raises
     // FileNotFoundInStaticDirectory. That predates this change and is only reachable with
     // [Sdk.BuildXL]enableCrossgen=1, which nothing in the repo or in .azdo sets.
-    //
-    // Crossgen is therefore deliberately not extended to osx-arm64: an extra arm would only add a
-    // third way to hit that. Returning undefined is safe -- this provider is a function of the
-    // runtime identifier and Shared.supportsCrossgen() treats undefined as 'no crossgen for it'.
     switch (runtimeVersion)
     {
         case "osx-x64":
@@ -78,6 +74,10 @@ export function crossgenProvider(runtimeVersion: Shared.RuntimeVersion): Shared.
                 JITPath: winFiles.getFile(r`runtimes/win-x64/native/clrjit.dll`)
             };
         default:
+            // Crossgen is deliberately not extended to osx-arm64: an extra arm would only add a third
+            // way to hit the problem above. Returning undefined is safe -- this provider is a
+            // function of the runtime identifier, and Shared.supportsCrossgen() treats an undefined
+            // result as 'no crossgen for this runtime'.
             return undefined;
     }
 }

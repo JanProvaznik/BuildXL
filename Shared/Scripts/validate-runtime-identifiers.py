@@ -185,6 +185,11 @@ def check_switches():
             cases = set(re.findall(r'case\s+"([a-z0-9\-]+)"', body))
             if "osx-x64" in cases and "osx-arm64" not in cases:
                 line = text.count("\n", 0, m.start()) + 1
+                # The window runs from 600 characters before the switch to the closing brace, so an
+                # annotation placed on the `default:` arm is found regardless of how long the
+                # comment above the switch grows. Prefer that placement: a marker sitting above the
+                # switch silently drops out of range when someone expands the prose, which is
+                # exactly how this check once started failing on its own annotations.
                 if DELIBERATE in text[max(0, m.start() - 600):i]:
                     notes.append(f"{os.path.relpath(path, ROOT)}:{line}: deliberate osx-arm64 exclusion in switch")
                 else:

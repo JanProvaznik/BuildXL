@@ -23,7 +23,26 @@ jobs:
   # Seconds, and it runs before a build that takes tens of minutes. A missing osx-arm64 arm in a
   # ternary chain does not necessarily fail the build; it silently falls through to whichever
   # runtime happens to be last, so this is checked rather than left to review.
-  - script: python Shared/Scripts/validate-runtime-identifiers.py
+  #
+  # This is the only Python in any BuildXL pipeline and the pool is self-hosted, so the interpreter
+  # is not guaranteed. Probing for it -- and warning rather than failing when there is none -- keeps
+  # a missing interpreter from reading as "the runtime identifier change is broken". The probe runs
+  # the candidate rather than trusting Get-Command, because 'python' on Windows is frequently the
+  # Microsoft Store stub, which resolves but does not execute.
+  - pwsh: |
+      $interpreter = $null
+      foreach ($candidate in @('python', 'python3', 'py')) {
+          if (-not (Get-Command $candidate -ErrorAction SilentlyContinue)) { continue }
+          $major = & $candidate -c "import sys; print(sys.version_info[0])" 2>$null
+          if ($LASTEXITCODE -eq 0 -and $major -eq '3') { $interpreter = $candidate; break }
+      }
+      if (-not $interpreter) {
+          Write-Host "##vso[task.logissue type=warning]No Python 3 interpreter on PATH; skipped Shared/Scripts/validate-runtime-identifiers.py. Install Python 3 on this agent to restore the check."
+          exit 0
+      }
+      Write-Host "Using $interpreter"
+      & $interpreter Shared/Scripts/validate-runtime-identifiers.py
+      exit $LASTEXITCODE
     displayName: 'Validate macOS Runtime Identifier Completeness'
 
   - script: >-
