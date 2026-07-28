@@ -67,12 +67,18 @@ namespace Node {
     const nodeVersion = "v22.15.0";
     const nodeWinDir = `node-${nodeVersion}-win-x64`;
     const nodeOsxDir = `node-${nodeVersion}-darwin-x64`;
+    const nodeOsxArm64Dir = `node-${nodeVersion}-darwin-arm64`;
+
+    // node ships a first-class darwin-arm64 build, so Apple Silicon needs no emulation here.
+    function isSupportedHostArchitecture(host: Context.CurrentHostInformation) : boolean {
+        return host.cpuArchitecture === "x64" || (host.cpuArchitecture === "arm64" && host.os === "macOS");
+    }
     const nodeLinuxDir = `node-${nodeVersion}-linux-x64`;
 
     function getNodePackage(): OpaqueDirectory {
         const host = Context.getCurrentHost();
     
-        Contract.assert(host.cpuArchitecture === "x64", "Only 64bit versions supported.");
+        Contract.assert(isSupportedHostArchitecture(host), "Only x64, and arm64 on macOS, are supported.");
     
         let pkgContents : OpaqueDirectory = undefined;
         
@@ -81,7 +87,9 @@ namespace Node {
                 pkgContents = <OpaqueDirectory>importFrom("NodeJs.win-x64").extracted;
                 break;
             case "macOS": 
-                pkgContents = <OpaqueDirectory>importFrom("NodeJs.osx-x64").extracted;
+                pkgContents = <OpaqueDirectory>(host.cpuArchitecture === "arm64"
+                    ? importFrom("NodeJs.osx-arm64").extracted
+                    : importFrom("NodeJs.osx-x64").extracted);
                 break;
             case "unix": 
                 pkgContents = <OpaqueDirectory>importFrom("NodeJs.linux-x64").extracted;
@@ -138,7 +146,7 @@ namespace Node {
     function getNodeTool() : Transformer.ToolDefinition {
         const host = Context.getCurrentHost();
     
-        Contract.assert(host.cpuArchitecture === "x64", "Only 64bit versions supported.");
+        Contract.assert(isSupportedHostArchitecture(host), "Only x64, and arm64 on macOS, are supported.");
     
         let executable : RelativePath = undefined;
         let pkgContents : OpaqueDirectory = nodePackage;
@@ -169,7 +177,7 @@ namespace Node {
     function getNpmCli() : File {
         const host = Context.getCurrentHost();
     
-        Contract.assert(host.cpuArchitecture === "x64", "Only 64bit versions supported.");
+        Contract.assert(isSupportedHostArchitecture(host), "Only x64, and arm64 on macOS, are supported.");
     
         let executable : RelativePath = undefined;
         let pkgContents : StaticDirectory = nodePackage;
@@ -228,7 +236,9 @@ namespace Node {
                 relativePath = r`${nodeWinDir}`;
                 break;
             case "macOS": 
-                relativePath = r`${nodeOsxDir}`;
+                relativePath = host.cpuArchitecture === "arm64"
+                    ? r`${nodeOsxArm64Dir}`
+                    : r`${nodeOsxDir}`;
                 break;
             case "unix": 
                 relativePath = r`${nodeLinuxDir}`;

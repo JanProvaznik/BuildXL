@@ -7,7 +7,7 @@ import * as Managed from "Sdk.Managed.Shared";
 const pkgContents = importFrom("Grpc.Core").Contents.all;
 
 namespace Deployment {
-    export declare const qualifier : {targetRuntime: "win-x64" | "osx-x64" | "linux-x64"};
+    export declare const qualifier : {targetRuntime: "win-x64" | "osx-x64" | "osx-arm64" | "linux-x64"};
     @@public
     export const runtimeContent: Deployment.Definition = qualifier.targetRuntime === "win-x64"  
         ? {
@@ -20,6 +20,11 @@ namespace Deployment {
                 },
             ]
         }
+        : qualifier.targetRuntime === "osx-arm64"
+        // Grpc.Core ships no osx-arm64 native: the only macOS dylib it carries is a non-fat x86_64
+        // 'libgrpc_csharp_ext.x64.dylib'. Deploying nothing is correct rather than deploying an
+        // unloadable binary -- osx-arm64 uses the managed Grpc.Net stack, which needs no native asset.
+        ? { contents: [] }
         : qualifier.targetRuntime === "osx-x64" 
         ? {
             contents: [

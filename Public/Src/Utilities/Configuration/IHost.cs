@@ -33,5 +33,10 @@ namespace BuildXL.Utilities.Configuration
         /// Intel / Amd 64-bit
         /// </summary>
         X64,
+
+        /// <summary>
+        /// ARM 64-bit (Apple Silicon, ARM64 Windows, aarch64 Linux)
+        /// </summary>
+        Arm64,
     }
 }

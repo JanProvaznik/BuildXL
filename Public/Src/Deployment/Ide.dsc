@@ -31,6 +31,13 @@ namespace Ide {
                         targetRuntime: "osx-x64"}
                         ).LanguageService.Server.vsix,
                     targetFileName: a`BuildXL.vscode.osx.vsix`,
+                },
+                {
+                    file: importFrom("BuildXL.Ide").withQualifier({
+                        targetFramework: BuildXLSdk.TargetFrameworks.DefaultTargetFramework,
+                        targetRuntime: "osx-arm64"}
+                        ).LanguageService.Server.vsix,
+                    targetFileName: a`BuildXL.vscode.osx-arm64.vsix`,
                 }
             ]),
             // The Linux extension is built only on Linux instead of cross compiling is so that all Linux artifacts that we publish are built on Linux end to end.

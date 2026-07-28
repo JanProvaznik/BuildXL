@@ -26,6 +26,12 @@ const osxRuntimeFiles = [
     ...importFrom("runtime.osx-x64.Microsoft.NETCore.DotNetHostPolicy.8.0").Contents.all.getContent().filter(f => Helpers.macOSRuntimeExtensions(f)),
 ];
 
+const osxArm64RuntimeFiles = [
+    ...importFrom("Microsoft.NETCore.App.Runtime.osx-arm64.11.0").Contents.all.getContent().filter(f => Helpers.macOSRuntimeExtensions(f)),
+    ...importFrom("runtime.osx-arm64.Microsoft.NETCore.DotNetHostResolver.8.0").Contents.all.getContent().filter(f => Helpers.macOSRuntimeExtensions(f)),
+    ...importFrom("runtime.osx-arm64.Microsoft.NETCore.DotNetHostPolicy.8.0").Contents.all.getContent().filter(f => Helpers.macOSRuntimeExtensions(f)),
+];
+
 const linuxRuntimeFiles = [
     ...importFrom("Microsoft.NETCore.App.Runtime.linux-x64.11.0").Contents.all.getContent().filter(f => Helpers.linuxRuntimeExtensions(f)),
     ...importFrom("runtime.linux-x64.Microsoft.NETCore.DotNetHostResolver.8.0").Contents.all.getContent().filter(f => Helpers.linuxRuntimeExtensions(f)),
@@ -39,6 +45,8 @@ export function runtimeContentProvider(runtimeVersion: Shared.RuntimeVersion): F
     {
         case "osx-x64":
             return osxRuntimeFiles;
+        case "osx-arm64":
+            return osxArm64RuntimeFiles;
         case "win-x64":
             return windowsRuntimeFiles;
         case "linux-x64":

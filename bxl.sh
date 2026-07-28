@@ -18,8 +18,13 @@ function logScriptExitCode {
 }
 trap logScriptExitCode EXIT
 
-# Capture the distribution release number (e.g. 24.04)
-DISTRIB_RELEASE=$(cat /etc/*-release | sed -n -e 's/^DISTRIB_RELEASE=//p')
+# Capture the distribution release number (e.g. 24.04). macOS has no /etc/*-release, and with
+# 'set -e' an unguarded 'cat' of a glob that matches nothing would abort the script.
+if compgen -G "/etc/*-release" > /dev/null; then
+    DISTRIB_RELEASE=$(cat /etc/*-release | sed -n -e 's/^DISTRIB_RELEASE=//p')
+else
+    DISTRIB_RELEASE=""
+fi
 
 declare DEFAULT_CACHE_CONFIG_FILE_NAME=DefaultCacheConfig.json
 
@@ -46,6 +51,23 @@ declare g_adoBuildRunnerCmdArgs=()
 if [[ "${OSTYPE}" == "linux-gnu" ]]; then
     readonly HostQualifier=Linux
     readonly DeploymentFolder=linux-x64
+    readonly HostIsMacOs=""
+elif [[ "${OSTYPE}" == darwin* ]]; then
+    # Build for the architecture we are actually running on. There is no Rosetta 2 fallback here on
+    # purpose: silently producing x86_64 binaries on an Apple Silicon machine is how macOS support
+    # ended up depending on an emulation layer that is not present on every Mac.
+    hostArch=$(uname -m)
+    if [[ "$hostArch" == "arm64" ]]; then
+        readonly HostQualifier=DotNetCoreMacArm64
+        readonly DeploymentFolder=osx-arm64
+    elif [[ "$hostArch" == "x86_64" ]]; then
+        readonly HostQualifier=DotNetCoreMac
+        readonly DeploymentFolder=osx-x64
+    else
+        print_error "Unsupported macOS architecture: ${hostArch}"
+        exit 1
+    fi
+    readonly HostIsMacOs="1"
 else
     print_error "Operating system not supported: ${OSTYPE}"
     exit 1
@@ -294,12 +316,14 @@ function setBxlCmdArgs {
     # The ebpf sandbox is enabled by default. So check whether it is explicitly disabled (/EnableLinuxEBPFSandbox- (case-insensitive)).
     # Set the EnableLinuxEBPFSandboxForTests property accordingly on the bxl command line so tests will honor the sandbox mode.
     # TODO: this is temporary until we can retire interpose
-    last_match=$(echo "${g_bxlCmdArgs[@]}" | grep -io '/EnableLinuxEBPFSandbox[+-]\{0,1\}' | tail -1)
-    if [[ -n "$last_match" && "$last_match" =~ - ]]; then
-        # CODESYNC: Public/Sdk/Public/Managed/Testing/XUnit/xunit.dsc
-        g_bxlCmdArgs+=("/p:EnableLinuxEBPFSandboxForTests=0")
-    else
-        g_bxlCmdArgs+=("/p:EnableLinuxEBPFSandboxForTests=1")
+    if [[ -z "$HostIsMacOs" ]]; then
+        last_match=$(echo "${g_bxlCmdArgs[@]}" | grep -io '/EnableLinuxEBPFSandbox[+-]\{0,1\}' | tail -1)
+        if [[ -n "$last_match" && "$last_match" =~ - ]]; then
+            # CODESYNC: Public/Sdk/Public/Managed/Testing/XUnit/xunit.dsc
+            g_bxlCmdArgs+=("/p:EnableLinuxEBPFSandboxForTests=0")
+        else
+            g_bxlCmdArgs+=("/p:EnableLinuxEBPFSandboxForTests=1")
+        fi
     fi
 }
 
@@ -322,6 +346,12 @@ function setExecutablePermissions() {
     chmod u+rx "$BUILDXL_BIN/NugetDownloader"
     chmod u+rx "$BUILDXL_BIN/Downloader"
     chmod u+rx "$BUILDXL_BIN/Extractor"
+
+    if [[ -n "$HostIsMacOs" ]]; then
+        # Files that arrive via a downloaded package carry com.apple.quarantine, and Gatekeeper refuses
+        # to execute them. This is a no-op when the attribute is absent, so it is safe to always run.
+        xattr -d -r com.apple.quarantine "$BUILDXL_BIN" 2>/dev/null || true
+    fi
 }
 
 function compileWithBxl() {
@@ -560,7 +590,7 @@ if [[ -n "$arg_Internal" && -n "$ADOBuild" && (! -n $VSS_NUGET_EXTERNAL_FEED_END
 fi
 
 # For local builds we want to use the in-build Linux runtime (as opposed to the runtime.linux-x64.BuildXL package)
-if [[ -z "$TF_BUILD" ]];then
+if [[ -z "$TF_BUILD" && -z "$HostIsMacOs" ]];then
     arg_Positional+=("/p:[Sdk.BuildXL]validateLinuxRuntime=0")
 fi
 

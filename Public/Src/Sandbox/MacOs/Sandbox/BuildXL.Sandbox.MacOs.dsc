@@ -6,7 +6,7 @@ import {Artifact, Cmd, Transformer} from "Sdk.Transformers";
 namespace EndpointSecuritySandbox {
     export declare const qualifier : {
         configuration: "debug" | "release",
-        targetRuntime: "osx-x64"
+        targetRuntime: "osx-x64" | "osx-arm64"
     };
 
     const isMacOsHost = Context.getCurrentHost().os === "macOS";

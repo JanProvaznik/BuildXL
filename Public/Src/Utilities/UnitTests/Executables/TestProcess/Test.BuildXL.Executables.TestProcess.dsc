@@ -38,6 +38,7 @@ namespace TestProcess {
                     }
                 ];
             case "osx-x64":
+            case "osx-arm64":
                 return [];
             case "linux-x64":
                 return [

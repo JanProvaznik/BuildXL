@@ -17,7 +17,9 @@ config({
         defaultQualifier: {
             targetRuntime: 
                 Context.getCurrentHost().os === "win" ? "win-x64" :
-                Context.getCurrentHost().os === "macOS" ? "osx-x64" : "linux-x64",
+                Context.getCurrentHost().os === "macOS"
+                    ? (Context.getCurrentHost().cpuArchitecture === "arm64" ? "osx-arm64" : "osx-x64")
+                    : "linux-x64",
         },
     }
 }); 

@@ -69,7 +69,7 @@ namespace LanguageService.Server {
             outputFileName: `BuildXL.vscode.${qualifier.targetRuntime}.vsix`,
             inputDirectory: vsixDeployment.contents,
             useUriEncoding: true,
-            fixUnixPermissions: [ "osx-x64", "linux-x64" ].indexOf(qualifier.targetRuntime) !== -1 ,
+            fixUnixPermissions: [ "osx-x64", "osx-arm64", "linux-x64" ].indexOf(qualifier.targetRuntime) !== -1 ,
             additionalDependencies: vsixDeployment.targetOpaques
         });
 
@@ -95,6 +95,9 @@ namespace LanguageService.Server {
                 break;
             case "osx-x64":
                 targetPlatform = "darwin-x64";
+                break;
+            case "osx-arm64":
+                targetPlatform = "darwin-arm64";
                 break;
             case "linux-x64":
                 targetPlatform = "linux-x64";

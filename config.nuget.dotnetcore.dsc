@@ -48,6 +48,10 @@ export const pkgs = [
     { id: "Microsoft.NETCore.App.Host.osx-x64", version: core80Version, alias: "Microsoft.NETCore.App.Host.osx-x64.8.0" },
     { id: "Microsoft.NETCore.App.Runtime.osx-x64", version: core80Version, alias: "Microsoft.NETCore.App.Runtime.osx-x64.8.0"},
 
+    // .NET Core osx-arm64 runtime deps
+    { id: "Microsoft.NETCore.App.Host.osx-arm64", version: core80Version, alias: "Microsoft.NETCore.App.Host.osx-arm64.8.0" },
+    { id: "Microsoft.NETCore.App.Runtime.osx-arm64", version: core80Version, alias: "Microsoft.NETCore.App.Runtime.osx-arm64.8.0"},
+
 
     // .NET Core linux-x64 runtime deps
     { id: "Microsoft.NETCore.App.Runtime.linux-x64", version: core80Version, alias: "Microsoft.NETCore.App.Runtime.linux-x64.8.0" },
@@ -81,9 +85,15 @@ export const pkgs = [
     // .NET Core osx-x64 runtime deps
     { id: "Microsoft.NETCore.App.Host.osx-x64", version: core90Version, alias: "Microsoft.NETCore.App.Host.osx-x64.9.0" },
     { id: "Microsoft.NETCore.App.Runtime.osx-x64", version: core90Version, alias: "Microsoft.NETCore.App.Runtime.osx-x64.9.0"},
+
+    // .NET Core osx-arm64 runtime deps
+    { id: "Microsoft.NETCore.App.Host.osx-arm64", version: core90Version, alias: "Microsoft.NETCore.App.Host.osx-arm64.9.0" },
+    { id: "Microsoft.NETCore.App.Runtime.osx-arm64", version: core90Version, alias: "Microsoft.NETCore.App.Runtime.osx-arm64.9.0"},
     // See the comment re the version used.
     { id: "runtime.osx-x64.Microsoft.NETCore.DotNetHostResolver", version: core80Version, alias: "runtime.osx-x64.Microsoft.NETCore.DotNetHostResolver.8.0" },
     { id: "runtime.osx-x64.Microsoft.NETCore.DotNetHostPolicy", version: core80Version, alias: "runtime.osx-x64.Microsoft.NETCore.DotNetHostPolicy.8.0" },
+    { id: "runtime.osx-arm64.Microsoft.NETCore.DotNetHostResolver", version: core80Version, alias: "runtime.osx-arm64.Microsoft.NETCore.DotNetHostResolver.8.0" },
+    { id: "runtime.osx-arm64.Microsoft.NETCore.DotNetHostPolicy", version: core80Version, alias: "runtime.osx-arm64.Microsoft.NETCore.DotNetHostPolicy.8.0" },
 
     // .NET Core linux-x64 runtime deps
     { id: "Microsoft.NETCore.App.Runtime.linux-x64", version: core90Version, alias: "Microsoft.NETCore.App.Runtime.linux-x64.9.0" },
@@ -112,6 +122,10 @@ export const pkgs = [
     { id: "Microsoft.NETCore.App.Host.osx-x64", version: core100Version, alias: "Microsoft.NETCore.App.Host.osx-x64.10.0" },
     { id: "Microsoft.NETCore.App.Runtime.osx-x64", version: core100Version, alias: "Microsoft.NETCore.App.Runtime.osx-x64.10.0"},
 
+    // .NET Core osx-arm64 runtime deps
+    { id: "Microsoft.NETCore.App.Host.osx-arm64", version: core100Version, alias: "Microsoft.NETCore.App.Host.osx-arm64.10.0" },
+    { id: "Microsoft.NETCore.App.Runtime.osx-arm64", version: core100Version, alias: "Microsoft.NETCore.App.Runtime.osx-arm64.10.0"},
+
     // .NET Core linux-x64 runtime deps
     { id: "Microsoft.NETCore.App.Runtime.linux-x64", version: core100Version, alias: "Microsoft.NETCore.App.Runtime.linux-x64.10.0" },
     { id: "Microsoft.NETCore.App.Host.linux-x64", version: core100Version, alias: "Microsoft.NETCore.App.Host.linux-x64.10.0" },
@@ -131,6 +145,10 @@ export const pkgs = [
     // .NET Core osx-x64 runtime deps
     { id: "Microsoft.NETCore.App.Host.osx-x64", version: core110Version, alias: "Microsoft.NETCore.App.Host.osx-x64.11.0" },
     { id: "Microsoft.NETCore.App.Runtime.osx-x64", version: core110Version, alias: "Microsoft.NETCore.App.Runtime.osx-x64.11.0"},
+
+    // .NET Core osx-arm64 runtime deps
+    { id: "Microsoft.NETCore.App.Host.osx-arm64", version: core110Version, alias: "Microsoft.NETCore.App.Host.osx-arm64.11.0" },
+    { id: "Microsoft.NETCore.App.Runtime.osx-arm64", version: core110Version, alias: "Microsoft.NETCore.App.Runtime.osx-arm64.11.0"},
 
     // .NET Core linux-x64 runtime deps
     { id: "Microsoft.NETCore.App.Runtime.linux-x64", version: core110Version, alias: "Microsoft.NETCore.App.Runtime.linux-x64.11.0" },

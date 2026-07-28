@@ -88,6 +88,11 @@ export function assembly(args: Arguments, targetType: Csc.TargetType) : Result {
         ...addIf(qualifier.targetRuntime === "osx-x64" && qualifier.targetFramework === "net9.0" && qualifier.configuration === "debug", "CompileNet9Osx", "CompileOsx"),
         ...addIf(qualifier.targetRuntime === "osx-x64" && qualifier.targetFramework === "net10.0" && qualifier.configuration === "debug", "CompileNet10Osx", "CompileOsx"),
         ...addIf(qualifier.targetRuntime === "osx-x64" && qualifier.targetFramework === "net11.0" && qualifier.configuration === "debug", "CompileNet11Osx", "CompileOsx"),
+
+        ...addIf(qualifier.targetRuntime === "osx-arm64" && qualifier.targetFramework === "net8.0" && qualifier.configuration === "debug", "CompileNet8OsxArm64", "CompileOsx"),
+        ...addIf(qualifier.targetRuntime === "osx-arm64" && qualifier.targetFramework === "net9.0" && qualifier.configuration === "debug", "CompileNet9OsxArm64", "CompileOsx"),
+        ...addIf(qualifier.targetRuntime === "osx-arm64" && qualifier.targetFramework === "net10.0" && qualifier.configuration === "debug", "CompileNet10OsxArm64", "CompileOsx"),
+        ...addIf(qualifier.targetRuntime === "osx-arm64" && qualifier.targetFramework === "net11.0" && qualifier.configuration === "debug", "CompileNet11OsxArm64", "CompileOsx"),
         
         ...addIf(qualifier.targetRuntime === "linux-x64" && qualifier.targetFramework === "net8.0" && qualifier.configuration === "debug", "CompileNet8Linux", "CompileLinux"),
         ...addIf(qualifier.targetRuntime === "linux-x64" && qualifier.targetFramework === "net9.0" && qualifier.configuration === "debug", "CompileNet9Linux", "CompileLinux"),
@@ -677,6 +682,8 @@ function getTargetRuntimeDefines() : string[] {
             return ["PLATFORM_WIN", "PLATFORM_X64"];
         case "osx-x64":
             return ["PLATFORM_OSX", "PLATFORM_X64"];
+        case "osx-arm64":
+            return ["PLATFORM_OSX", "PLATFORM_ARM64"];
         case "linux-x64":
             return ["PLATFORM_LINUX", "PLATFORM_X64"];
         default:

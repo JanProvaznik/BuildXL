@@ -6,7 +6,7 @@ import * as Deployment from "Sdk.Deployment";
 import * as BuildXLSdk from "Sdk.BuildXL";
 
 namespace Tests.MacOS {
-    export declare const qualifier : { configuration: "debug" | "release", targetFramework: BuildXLSdk.TargetFrameworks.CoreClrTargetFrameworks, targetRuntime: "osx-x64" };
+    export declare const qualifier : { configuration: "debug" | "release", targetFramework: BuildXLSdk.TargetFrameworks.CoreClrTargetFrameworks, targetRuntime: "osx-x64" | "osx-arm64" };
 
     const sharedBinFolderName = a`sharedbin`;
     const tests = createAllDefs();

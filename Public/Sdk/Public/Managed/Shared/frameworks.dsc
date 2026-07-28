@@ -71,7 +71,34 @@ export type RuntimeConfigStyle = "appConfig" | "runtimeJson" | "none";
 export type ApplicationDeploymentStyle = "frameworkDependent" | "selfContained";
 
 @@public
-export type RuntimeVersion = "win-x64" | "osx-x64" | "linux-x64";
+export type RuntimeVersion = "win-x64" | "osx-x64" | "osx-arm64" | "linux-x64";
+
+/**
+ * The runtime identifier matching the machine the build is running on.
+ *
+ * macOS is the only host where the architecture actually has to be consulted: Apple Silicon Macs
+ * cannot run osx-x64 binaries unless Rosetta 2 happens to be installed, and Rosetta is neither
+ * present by default nor guaranteed to stay available, so picking osx-x64 on an arm64 Mac produces
+ * a deployment that will not start.
+ */
+@@public
+export function currentMachineRuntimeVersion() : RuntimeVersion {
+    const host = Context.getCurrentHost();
+    switch (host.os) {
+        case "win":
+            return "win-x64";
+        case "macOS":
+            return host.cpuArchitecture === "arm64" ? "osx-arm64" : "osx-x64";
+        default:
+            return "linux-x64";
+    }
+}
+
+/** True for every macOS runtime identifier. */
+@@public
+export function isMacOsRuntime(runtimeVersion: RuntimeVersion) : boolean {
+    return runtimeVersion === "osx-x64" || runtimeVersion === "osx-arm64";
+}
 
 @@public
 export type DotNetCoreVersion = "net8.0" | "net9.0" | "net10.0" | "net11.0";
@@ -130,24 +157,21 @@ namespace TargetFrameworks {
         export interface Current extends Qualifier {
             configuration: "debug" | "release";
             targetFramework: "net9.0",
-            targetRuntime: "win-x64" | "osx-x64" | "linux-x64",
+            targetRuntime: "win-x64" | "osx-x64" | "osx-arm64" | "linux-x64",
         }
 
         @@public
         export interface CurrentWithStandard extends Qualifier {
             configuration: "debug" | "release";
             targetFramework: "net9.0" | "netstandard2.0",
-            targetRuntime: "win-x64" | "osx-x64" | "linux-x64",
+            targetRuntime: "win-x64" | "osx-x64" | "osx-arm64" | "linux-x64",
         }
 
         @@public
         export const current : Current = {
             configuration: qualifier.configuration,
             targetFramework: "net9.0",
-            targetRuntime: 
-                Context.getCurrentHost().os === "win"   ? "win-x64" : 
-                Context.getCurrentHost().os === "macOS" ? "osx-x64" :
-                "linux-x64",
+            targetRuntime: currentMachineRuntimeVersion(),
         };
     }
 }

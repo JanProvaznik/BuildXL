@@ -8,7 +8,7 @@ import * as Deployment from "Sdk.Deployment";
 
 export declare const qualifier: {
     targetFramework: TargetFrameworks.AllFrameworks;
-    targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
+    targetRuntime: "win-x64" | "osx-x64" | "osx-arm64" | "linux-x64";
     configuration: "debug" | "release";
 };
 
@@ -64,6 +64,16 @@ function getRocksDbNativeDeployablesForTargetRuntime() : File[] {
             break;
         case "linux-x64":
             nativeFilesToDeploy = nativeFilesToDeploy.push(nativePackage.contents.getFile(r`build/native/amd64/librocksdb.so`));
+            break;
+        case "osx-arm64":
+            // The RocksDbNative package is built for amd64 only ('build/native/amd64/...'); it carries no
+            // arm64 macOS dylib. Failing here with an explicit message is better than a generic
+            // 'file not found in package' error, because the fix is external to this repository:
+            // RocksDbNative has to publish 'build/native/arm64/librocksdb.dylib' first.
+            Contract.fail(
+                "RocksDbNative does not ship an osx-arm64 native library. " +
+                "Publish a RocksDbNative package containing 'build/native/arm64/librocksdb.dylib' " +
+                "and add it here before building the osx-arm64 target runtime.");
             break;
         default:
             Contract.fail(`Unsupported target runtime '${qualifier.targetRuntime}' for RocksDbNative.`);

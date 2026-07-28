@@ -21,7 +21,7 @@ namespace TestGeneratorDeployment {
                 subfolder: a`MacOs`,
                 contents: $.withQualifier({
                     targetFramework: Managed.TargetFrameworks.DefaultTargetFramework,
-                    targetRuntime: "osx-x64"
+                    targetRuntime: Context.getCurrentHost().cpuArchitecture === "arm64" ? "osx-arm64" : "osx-x64"
                 }).TestGenerator.deploymentContents
             }]),
             ...addIfLazy(Context.getCurrentHost().os === "unix", () => [{

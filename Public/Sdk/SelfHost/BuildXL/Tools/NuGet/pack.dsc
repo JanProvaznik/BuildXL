@@ -17,7 +17,10 @@ function getNugetPackerToolForCurrentOs() : Transformer.ToolDefinition {
         case "win":
             return NugetPacker.withQualifier({targetFramework: "net9.0", targetRuntime: "win-x64", configuration: "release"}).tool;
         case "macOS":
-            return NugetPacker.withQualifier({targetFramework: "net9.0", targetRuntime: "osx-x64", configuration: "release"}).tool;
+            // The packer runs on the host, so it must match the host architecture.
+            return Context.getCurrentHost().cpuArchitecture === "arm64"
+                ? NugetPacker.withQualifier({targetFramework: "net9.0", targetRuntime: "osx-arm64", configuration: "release"}).tool
+                : NugetPacker.withQualifier({targetFramework: "net9.0", targetRuntime: "osx-x64", configuration: "release"}).tool;
         case "unix":
             return NugetPacker.withQualifier({targetFramework: "net9.0", targetRuntime: "linux-x64", configuration: "release"}).tool;
         default:

@@ -295,6 +295,8 @@ export const deploymentForBuildXL: Deployment.Definition = {
 
         ...addIf(qualifier.targetRuntime === "win-x64",
             importFrom("Grpc.Core").Contents.all.getFile("runtimes/win-x64/native/grpc_csharp_ext.x64.dll")),
+        // Deliberately not extended to osx-arm64: Grpc.Core's macOS dylib is a non-fat x86_64 binary
+        // and would be unloadable on Apple Silicon. osx-arm64 relies on the managed Grpc.Net stack.
         ...addIf(qualifier.targetRuntime === "osx-x64",
             importFrom("Grpc.Core").Contents.all.getFile("runtimes/osx-x64/native/libgrpc_csharp_ext.x64.dylib")),
     ]

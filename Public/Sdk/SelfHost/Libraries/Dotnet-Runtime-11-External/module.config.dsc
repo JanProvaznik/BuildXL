@@ -14,6 +14,11 @@ module({
 });
 
 module({
+    name: "DotNet-Runtime-11.osx-arm64",
+    projects: [f`DotNet-Runtime.osx-arm64.dsc`]
+});
+
+module({
     name: "DotNet-Runtime-11.linux-x64",
     projects: [f`DotNet-Runtime.linux-x64.dsc`]
 });

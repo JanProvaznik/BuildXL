@@ -27,9 +27,14 @@ function contentFilter(file: File): boolean {
             : Contract.fail("Unknown os: " + currentOs);
 }
 
+// The patcher runs on the *host*, so on an Apple Silicon Mac it has to be an arm64 binary: the
+// osx-x64 build in the package cannot be executed there without Rosetta 2. Cross-building for
+// macOS from Windows or Linux is unaffected, because then the host is win-x64 or linux-x64.
 const patcherExecutable =
     isWinOS   ? pkgContents.getFile(r`tools/win-x64/AppHostPatcher.exe`) :
-    isMacOS   ? pkgContents.getFile(r`tools/osx-x64/AppHostPatcher`) :
+    isMacOS   ? (Context.getCurrentHost().cpuArchitecture === "arm64"
+                    ? pkgContents.getFile(r`tools/osx-arm64/AppHostPatcher`)
+                    : pkgContents.getFile(r`tools/osx-x64/AppHostPatcher`)) :
     isLinuxOS ? pkgContents.getFile(r`tools/linux-x64/AppHostPatcher`) :
     undefined;
 
@@ -57,6 +62,9 @@ export function patchBinary(args: Arguments) : Result {
             :
         args.targetRuntimeVersion === "osx-x64"
             ? importFrom("Microsoft.NETCore.App.Host.osx-x64.8.0").Contents.all
+            :
+        args.targetRuntimeVersion === "osx-arm64"
+            ? importFrom("Microsoft.NETCore.App.Host.osx-arm64.8.0").Contents.all
             : Contract.fail("Unknown target runtime: " + args.targetRuntimeVersion);
 
     // Pick the apphost based on the target OS, not the current OS

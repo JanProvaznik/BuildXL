@@ -51,7 +51,9 @@ namespace Helpers {
     export function getDotNetCoreToolTemplate(version: DotNetCoreVersion) : Transformer.ExecuteArgumentsComposible {
         const host = Context.getCurrentHost();
         
-        Contract.assert(host.cpuArchitecture === "x64", "The current DotNetCore Runtime package only has x64 version of Node. Ensure this runs on a 64-bit OS -or- update PowerShell.Core package to have other architectures embedded and fix this logic");
+        Contract.assert(
+            host.cpuArchitecture === "x64" || host.cpuArchitecture === "arm64",
+            "The DotNetCore Runtime packages are only published for x64 and arm64. Ensure you run on a 64-bit OS -or- add the missing architecture to the DotNet-Runtime downloads in config.dsc and to getRuntimePackagesContent below.");
 
         const executable = host.os === 'win' ? r`dotnet.exe` : r`dotnet`;
         const pkgContents  = getRuntimePackagesContent(version, host);
@@ -77,13 +79,20 @@ namespace Helpers {
     }
 
     function getRuntimePackagesContent(version: DotNetCoreVersion, host: Context.CurrentHostInformation) : StaticDirectory {
+        // The runtime used to run build tools has to match the machine executing the build, not the
+        // runtime being targeted. On Apple Silicon that means osx-arm64: the osx-x64 runtime only
+        // runs there under Rosetta 2, which is not installed by default and cannot be relied on.
+        const isMacArm64 = host.cpuArchitecture === "arm64";
+
         if (version === 'net8.0')
         {
             switch (host.os) {
                 case "win":
                     return importFrom("DotNet-Runtime-8.win-x64").extracted;
                 case "macOS":
-                    return importFrom("DotNet-Runtime-8.osx-x64").extracted;
+                    return isMacArm64
+                        ? importFrom("DotNet-Runtime-8.osx-arm64").extracted
+                        : importFrom("DotNet-Runtime-8.osx-x64").extracted;
                 case "unix":
                     return importFrom("DotNet-Runtime-8.linux-x64").extracted;
                 default:
@@ -96,7 +105,9 @@ namespace Helpers {
                 case "win":
                     return importFrom("DotNet-Runtime-9.win-x64").extracted;
                 case "macOS":
-                    return importFrom("DotNet-Runtime-9.osx-x64").extracted;
+                    return isMacArm64
+                        ? importFrom("DotNet-Runtime-9.osx-arm64").extracted
+                        : importFrom("DotNet-Runtime-9.osx-x64").extracted;
                 case "unix":
                     return importFrom("DotNet-Runtime-9.linux-x64").extracted;
                 default:
@@ -109,7 +120,9 @@ namespace Helpers {
                 case "win":
                     return importFrom("DotNet-Runtime-10.win-x64").extracted;
                 case "macOS":
-                    return importFrom("DotNet-Runtime-10.osx-x64").extracted;
+                    return isMacArm64
+                        ? importFrom("DotNet-Runtime-10.osx-arm64").extracted
+                        : importFrom("DotNet-Runtime-10.osx-x64").extracted;
                 case "unix":
                     return importFrom("DotNet-Runtime-10.linux-x64").extracted;
                 default:
@@ -122,7 +135,9 @@ namespace Helpers {
                 case "win":
                     return importFrom("DotNet-Runtime-11.win-x64").extracted;
                 case "macOS":
-                    return importFrom("DotNet-Runtime-11.osx-x64").extracted;
+                    return isMacArm64
+                        ? importFrom("DotNet-Runtime-11.osx-arm64").extracted
+                        : importFrom("DotNet-Runtime-11.osx-x64").extracted;
                 case "unix":
                     return importFrom("DotNet-Runtime-11.linux-x64").extracted;
                 default:

@@ -150,6 +150,18 @@ namespace NugetPackages {
         deploymentOptions: reducedDeploymentOptions
     });
 
+    // Apple Silicon. Without this package there is no way to obtain a BuildXL that runs natively on an
+    // arm64 Mac: the osx-x64 package only runs under Rosetta 2, which is not present on every machine
+    // and is being wound down by Apple.
+    const osxArm64 = pack({
+        id: `${packageNamePrefix}.osx-arm64`,
+        deployment: BuildXL.withQualifier({
+            targetFramework: defaultTargetFramework,
+            targetRuntime: "osx-arm64"
+        }).deployment,
+        deploymentOptions: reducedDeploymentOptions
+    });
+
     const linuxX64 = pack({
         id: `${packageNamePrefix}.linux-x64`,
         deployment: BuildXL.withQualifier({
@@ -659,6 +671,14 @@ namespace NugetPackages {
         }).deployment
     });
 
+    const toolsAdoBuildRunnerOsxArm64 = pack({
+        id: `${packageNamePrefix}.Tools.AdoBuildRunner.osx-arm64`,
+        deployment: importFrom("BuildXL.AdoBuildRunner").BuildXL.AdoBuildRunner.withQualifier({
+            targetFramework: defaultTargetFramework,
+            targetRuntime: "osx-arm64"
+        }).deployment
+    });
+
     const deployment : Deployment.Definition = {
         contents: [
             ...addIfLazy(canBuildAllPackagesOnThisHost, () => [
@@ -681,7 +701,9 @@ namespace NugetPackages {
                 engineCache,
                 sdks,
                 osxX64,
+                osxArm64,
                 toolsAdoBuildRunner,
+                toolsAdoBuildRunnerOsxArm64,
             ]),
             ...addIfLazy(!BuildXLSdk.Flags.genVSSolution && Context.getCurrentHost().os === "unix", () => [
                 linuxX64,

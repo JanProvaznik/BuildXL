@@ -4,7 +4,7 @@
 import * as SdkDeployment from "Sdk.Deployment";
 
 namespace EndpointSecurityDeployment {
-    export declare const qualifier: {configuration: "debug" | "release", targetRuntime: "osx-x64"};
+    export declare const qualifier: {configuration: "debug" | "release", targetRuntime: "osx-x64" | "osx-arm64"};
 
     /**
      * The broker is deployed next to bxl and launched per pip.

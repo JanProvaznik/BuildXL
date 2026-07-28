@@ -452,6 +452,12 @@ config({
                     archiveType: "tgz",
                 },
                 {
+                    moduleName: "DotNet-Runtime.osx-arm64.11.0",
+                    url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/11.0.0-preview.6.26359.118/dotnet-runtime-11.0.0-preview.6.26359.118-osx-arm64.tar.gz",
+                    hash: "VSO0:FE7B82233B57FA2D1328C40C79A0487E66D23B2CBA86E3810B157DC8C0B0CCC900",
+                    archiveType: "tgz",
+                },
+                {
                     moduleName: "DotNet-Runtime.linux-x64.11.0",
                     url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/11.0.0-preview.6.26359.118/dotnet-runtime-11.0.0-preview.6.26359.118-linux-x64.tar.gz",
                     hash: "VSO0:F03C03893FCAE5E5368517483989B00B1AD0A35864A6D21291B5B1083F7E6B5400",
@@ -469,6 +475,12 @@ config({
                     moduleName: "DotNet-Runtime.osx-x64.10.0",
                     url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.9/dotnet-runtime-10.0.9-osx-x64.tar.gz",
                     hash: "VSO0:D7D9F5549613A62809070BA5666F38B006C36643C5899DC274F9DBA2B54F977C00",
+                    archiveType: "tgz",
+                },
+                {
+                    moduleName: "DotNet-Runtime.osx-arm64.10.0",
+                    url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.9/dotnet-runtime-10.0.9-osx-arm64.tar.gz",
+                    hash: "VSO0:0A0F9D2861F67A675545F2B671761CBAC45F42478D4711F50B9F7A6A16EEF93500",
                     archiveType: "tgz",
                 },
                 {
@@ -492,6 +504,12 @@ config({
                     archiveType: "tgz",
                 },
                 {
+                    moduleName: "DotNet-Runtime.osx-arm64.9.0",
+                    url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/9.0.17/dotnet-runtime-9.0.17-osx-arm64.tar.gz",
+                    hash: "VSO0:9B3F15B03EAB5FA60FDD928F2D21BDC79A8A9BB733EA8141E79D696D3D6579E900",
+                    archiveType: "tgz",
+                },
+                {
                     moduleName: "DotNet-Runtime.linux-x64.9.0",
                     url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/9.0.17/dotnet-runtime-9.0.17-linux-x64.tar.gz",
                     hash: "VSO0:169EC1B06ACCBDEB5E693E5614B3A61F894EE4C45B3CBFE6A6F23EBE7C34BDDC00",
@@ -512,6 +530,12 @@ config({
                     archiveType: "tgz",
                 },
                 {
+                    moduleName: "DotNet-Runtime.osx-arm64.8.0",
+                    url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/8.0.28/dotnet-runtime-8.0.28-osx-arm64.tar.gz",
+                    hash: "VSO0:ED576AD9586CE1A6EDD393A1D67C81EF8323CC07143207D3129C22A799F2CD6000",
+                    archiveType: "tgz",
+                },
+                {
                     moduleName: "DotNet-Runtime.linux-x64.8.0",
                     url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/8.0.28/dotnet-runtime-8.0.28-linux-x64.tar.gz",
                     hash: "VSO0:B803045A52A8465C27CEDC6ED461323224F8F52FDA603CE78CC1EECE6B12F60C00",
@@ -529,6 +553,12 @@ config({
                     moduleName: "NodeJs.osx-x64",
                     url: "https://nodejs.org/dist/v22.15.0/node-v22.15.0-darwin-x64.tar.gz",
                     hash: "VSO0:9B190DBB92C6F576E178CAFD85C0156719CF65F8D39D7C83E4AB12FC132E269500",
+                    archiveType: "tgz",
+                },
+                {
+                    moduleName: "NodeJs.osx-arm64",
+                    url: "https://nodejs.org/dist/v22.15.0/node-v22.15.0-darwin-arm64.tar.gz",
+                    hash: "VSO0:4224841EC9F595C9806C016ED1924B13262B456A137D37F156BD387ACACA746600",
                     archiveType: "tgz",
                 },
                 {
@@ -577,9 +607,14 @@ config({
         defaultQualifier: {
             configuration: "debug",
             targetFramework: "net9.0",
+            // On macOS the CPU architecture has to be consulted, not just the OS: an Apple Silicon
+            // Mac cannot execute osx-x64 binaries unless Rosetta 2 happens to be installed, and it
+            // is neither installed by default nor guaranteed to remain available.
             targetRuntime:
                 Context.getCurrentHost().os === "win" ? "win-x64" :
-                Context.getCurrentHost().os === "macOS" ? "osx-x64" : "linux-x64",
+                Context.getCurrentHost().os === "macOS"
+                    ? (Context.getCurrentHost().cpuArchitecture === "arm64" ? "osx-arm64" : "osx-x64")
+                    : "linux-x64",
         },
         namedQualifiers: {
             Debug: {
@@ -626,6 +661,31 @@ config({
                 configuration: "debug",
                 targetFramework: "net10.0",
                 targetRuntime: "osx-x64",
+            },
+            DebugDotNetCoreMacArm64: {
+                configuration: "debug",
+                targetFramework: "net9.0",
+                targetRuntime: "osx-arm64",
+            },
+            DebugDotNetCoreMacArm64Net9: {
+                configuration: "debug",
+                targetFramework: "net9.0",
+                targetRuntime: "osx-arm64",
+            },
+            DebugDotNetCoreMacArm64Net8: {
+                configuration: "debug",
+                targetFramework: "net8.0",
+                targetRuntime: "osx-arm64",
+            },
+            DebugDotNetCoreMacArm64Net10: {
+                configuration: "debug",
+                targetFramework: "net10.0",
+                targetRuntime: "osx-arm64",
+            },
+            DebugDotNetCoreMacArm64Net11: {
+                configuration: "debug",
+                targetFramework: "net11.0",
+                targetRuntime: "osx-arm64",
             },
             DebugLinux: {
                 configuration: "debug",
@@ -692,6 +752,31 @@ config({
                 configuration: "release",
                 targetFramework: "net10.0",
                 targetRuntime: "osx-x64",
+            },
+            ReleaseDotNetCoreMacArm64: {
+                configuration: "release",
+                targetFramework: "net9.0",
+                targetRuntime: "osx-arm64",
+            },
+            ReleaseDotNetCoreMacArm64Net9: {
+                configuration: "release",
+                targetFramework: "net9.0",
+                targetRuntime: "osx-arm64",
+            },
+            ReleaseDotNetCoreMacArm64Net8: {
+                configuration: "release",
+                targetFramework: "net8.0",
+                targetRuntime: "osx-arm64",
+            },
+            ReleaseDotNetCoreMacArm64Net10: {
+                configuration: "release",
+                targetFramework: "net10.0",
+                targetRuntime: "osx-arm64",
+            },
+            ReleaseDotNetCoreMacArm64Net11: {
+                configuration: "release",
+                targetFramework: "net11.0",
+                targetRuntime: "osx-arm64",
             },
             ReleaseLinux: {
                 configuration: "release",

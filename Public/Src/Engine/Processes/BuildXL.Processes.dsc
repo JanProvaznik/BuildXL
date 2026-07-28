@@ -60,7 +60,7 @@ namespace Processes {
                 importFrom("BuildXL.Sandbox.Linux").Deployment.natives,
                 importFrom("BuildXL.Sandbox.Linux.eBPF").Deployment.natives
             ]),
-            ...addIfLazy(Context.getCurrentHost().os === "macOS" && qualifier.targetRuntime === "osx-x64", () => [
+            ...addIfLazy(Context.getCurrentHost().os === "macOS" && (qualifier.targetRuntime === "osx-x64" || qualifier.targetRuntime === "osx-arm64"), () => [
                 MacServices.EndpointSecurityDeployment.natives
             ]),
         ],
