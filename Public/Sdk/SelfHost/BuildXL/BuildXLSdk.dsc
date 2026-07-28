@@ -148,13 +148,34 @@ export interface PolySharpAttributes {
  * Returns true if the current qualifier is targeting .NET Core or .NET Standard
  */
 @@public
-export const isDotNetCoreOrStandard : boolean = qualifier.targetFramework === "netstandard2.0" || qualifier.targetFramework === "net8.0" || qualifier.targetFramework === "net9.0" || qualifier.targetFramework === "net10.0";
+export const isDotNetCoreOrStandard : boolean = qualifier.targetFramework === "netstandard2.0" || qualifier.targetFramework === "net8.0" || qualifier.targetFramework === "net9.0" || qualifier.targetFramework === "net10.0" || qualifier.targetFramework === "net11.0";
 
 /**
  * Returns true if the current qualifier is targeting .NET Core
  */
 @@public
-export const isDotNetCore : boolean = qualifier.targetFramework === "net8.0" || qualifier.targetFramework === "net9.0" || qualifier.targetFramework === "net10.0";
+export const isDotNetCore : boolean = qualifier.targetFramework === "net8.0" || qualifier.targetFramework === "net9.0" || qualifier.targetFramework === "net10.0" || qualifier.targetFramework === "net11.0";
+
+/**
+ * Returns true if the current qualifier targets .NET 10 or later.
+ *
+ * .NET 10 promoted several previously out-of-band libraries into the BCL (System.Threading.AccessControl,
+ * System.IO.Pipelines, System.Linq.Async). Referencing the corresponding NuGet package from one of those
+ * frameworks produces CS0433 ambiguity. Because in-box promotions are permanent, this has to be a
+ * "10 or later" test -- an equality test against "net10.0" silently breaks on every new framework.
+ */
+@@public
+export const isDotNetCore10OrGreater : boolean = qualifier.targetFramework === "net10.0" || qualifier.targetFramework === "net11.0";
+
+/**
+ * Returns true if the current qualifier targets .NET 11 or later.
+ *
+ * .NET 11 promoted Microsoft.Extensions.Logging.Abstractions into the base shared framework
+ * (it is now in Microsoft.NETCore.App.Ref/ref/net11.0 and the matching runtime packs), so referencing
+ * the NuGet package from net11 duplicates types like ILogger.
+ */
+@@public
+export const isDotNetCore11OrGreater : boolean = qualifier.targetFramework === "net11.0";
 
 @@public
 export const isFullFramework : boolean = qualifier.targetFramework === "net472";
@@ -185,7 +206,7 @@ export const targetFrameworkMatchesCurrentHost =
 export const restrictTestRunToSomeQualifiers =
     qualifier.configuration !== "debug" ||
     // Running tests for .NET Core App 3.0, .NET 5 and 4.7.2 frameworks only.
-    (qualifier.targetFramework !== "net8.0" && qualifier.targetFramework !== "net9.0" && qualifier.targetFramework !== "net10.0" && qualifier.targetFramework !== "net472") ||
+    (qualifier.targetFramework !== "net8.0" && qualifier.targetFramework !== "net9.0" && qualifier.targetFramework !== "net10.0" && qualifier.targetFramework !== "net11.0" && qualifier.targetFramework !== "net472") ||
     !targetFrameworkMatchesCurrentHost;
 
 /***
@@ -937,7 +958,7 @@ function processArguments(args: Arguments, targetType: Csc.TargetType) : Argumen
     }
 
     // Required members are needed for all target frameworks prior net7.
-    if (qualifier.targetFramework !== "net8.0" && qualifier.targetFramework !== "net9.0" && qualifier.targetFramework !== "net10.0" && args.addPolySharpAttributes !== false) {
+    if (qualifier.targetFramework !== "net8.0" && qualifier.targetFramework !== "net9.0" && qualifier.targetFramework !== "net10.0" && qualifier.targetFramework !== "net11.0" && args.addPolySharpAttributes !== false) {
         polySharpAttributeFiles = polySharpAttributeFiles.concat([polySharpAttributes.required, polySharpAttributes.setsRequiredMembers, polySharpAttributes.compilerFeatureRequired, polySharpAttributes.stringSyntax]);
     }
 

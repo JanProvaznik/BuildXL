@@ -591,6 +591,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.AspNetCore.App.Ref",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.AspNetCore.App.Ref",
           "Version": "8.0.28"
         }
       }
@@ -618,6 +627,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.AspNetCore.App.Runtime.linux-x64",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.AspNetCore.App.Runtime.linux-x64",
           "Version": "8.0.28"
         }
       }
@@ -645,6 +663,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.AspNetCore.App.Runtime.osx-x64",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.AspNetCore.App.Runtime.osx-x64",
           "Version": "8.0.28"
         }
       }
@@ -664,6 +691,15 @@
         "NuGet": {
           "Name": "Microsoft.AspNetCore.App.Runtime.win-x64",
           "Version": "10.0.9"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.AspNetCore.App.Runtime.win-x64",
+          "Version": "11.0.0-preview.6.26359.118"
         }
       }
     },
@@ -1518,6 +1554,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.NETCore.App.Host.linux-x64",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.NETCore.App.Host.linux-x64",
           "Version": "8.0.28"
         }
       }
@@ -1545,6 +1590,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.NETCore.App.Host.osx-x64",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.NETCore.App.Host.osx-x64",
           "Version": "8.0.28"
         }
       }
@@ -1572,6 +1626,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.NETCore.App.Host.win-x64",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.NETCore.App.Host.win-x64",
           "Version": "8.0.28"
         }
       }
@@ -1599,6 +1662,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.NETCore.App.Ref",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.NETCore.App.Ref",
           "Version": "8.0.28"
         }
       }
@@ -1626,6 +1698,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.NETCore.App.Runtime.linux-x64",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.NETCore.App.Runtime.linux-x64",
           "Version": "8.0.28"
         }
       }
@@ -1653,6 +1734,15 @@
         "Type": "NuGet",
         "NuGet": {
           "Name": "Microsoft.NETCore.App.Runtime.osx-x64",
+          "Version": "11.0.0-preview.6.26359.118"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.NETCore.App.Runtime.osx-x64",
           "Version": "8.0.28"
         }
       }
@@ -1672,6 +1762,15 @@
         "NuGet": {
           "Name": "Microsoft.NETCore.App.Runtime.win-x64",
           "Version": "10.0.9"
+        }
+      }
+    },
+    {
+      "Component": {
+        "Type": "NuGet",
+        "NuGet": {
+          "Name": "Microsoft.NETCore.App.Runtime.win-x64",
+          "Version": "11.0.0-preview.6.26359.118"
         }
       }
     },

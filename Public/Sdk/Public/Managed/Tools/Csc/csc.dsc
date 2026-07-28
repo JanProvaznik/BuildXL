@@ -271,6 +271,10 @@ export function getDotNetCoreVersion(cscArguments: Arguments): Shared.DotNetCore
         return "net9.0";
     }
 
+    if (cscArguments.defines.some(e => e === "NET11_0")) {
+        return "net11.0";
+    }
+
     if (cscArguments.defines.some(e => e === "NET10_0")) {
         return "net10.0";
     }

@@ -36,7 +36,8 @@ namespace Library {
             importFrom("BuildXL.Cache.DistributedCache.Host").Configuration.dll,
             ...getGrpcPackages(true),
             ...getGrpcDotNetPackages(),
-            importFrom("Microsoft.Extensions.Logging.Abstractions").pkg,
+            // .NET 11 ships Microsoft.Extensions.Logging.Abstractions in the base shared framework.
+            ...addIf(!BuildXLSdk.isDotNetCore11OrGreater, importFrom("Microsoft.Extensions.Logging.Abstractions").pkg),
             ...BuildXLSdk.bclAsyncPackages,
 
             importFrom("Polly").pkg,

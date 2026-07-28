@@ -101,7 +101,7 @@ namespace Test.BuildXL.FrontEnd.Nuget
 import * as Managed from ""Sdk.Managed"";
 
 export declare const qualifier: {{
-    targetFramework: ""net45"" | ""net451"" | ""net452"" | ""net46"" | ""net461"" | ""net462"" | ""net472"" | ""netstandard2.0"" | ""netcoreapp2.0"" | ""netcoreapp2.1"" | ""netcoreapp2.2"" | ""netstandard2.1"" | ""netcoreapp3.0"" | ""netcoreapp3.1"" | ""net5.0"" | ""net6.0"" | ""net7.0"" | ""net8.0"" | ""net9.0"" | ""net10.0"",
+    targetFramework: ""net45"" | ""net451"" | ""net452"" | ""net46"" | ""net461"" | ""net462"" | ""net472"" | ""netstandard2.0"" | ""netcoreapp2.0"" | ""netcoreapp2.1"" | ""netcoreapp2.2"" | ""netstandard2.1"" | ""netcoreapp3.0"" | ""netcoreapp3.1"" | ""net5.0"" | ""net6.0"" | ""net7.0"" | ""net8.0"" | ""net9.0"" | ""net10.0"" | ""net11.0"",
     targetRuntime: ""win-x64"" | ""osx-x64"" | ""linux-x64"",
 }};
 
@@ -168,6 +168,7 @@ export const pkg: Managed.ManagedNugetPackage = (() => {{
         case ""net8.0"":
         case ""net9.0"":
         case ""net10.0"":
+        case ""net11.0"":
             return Managed.Factory.createNugetPackage(
                 ""TestPkg"",
                 ""1.999"",
@@ -178,7 +179,7 @@ export const pkg: Managed.ManagedNugetPackage = (() => {{
                 ],
                 [
                     ...addIfLazy(
-                        qualifier.targetFramework === ""netstandard2.0"" || qualifier.targetFramework === ""netcoreapp2.0"" || qualifier.targetFramework === ""netcoreapp2.1"" || qualifier.targetFramework === ""netcoreapp2.2"" || qualifier.targetFramework === ""netstandard2.1"" || qualifier.targetFramework === ""netcoreapp3.0"" || qualifier.targetFramework === ""netcoreapp3.1"" || qualifier.targetFramework === ""net5.0"" || qualifier.targetFramework === ""net6.0"" || qualifier.targetFramework === ""net7.0"" || qualifier.targetFramework === ""net8.0"" || qualifier.targetFramework === ""net9.0"" || qualifier.targetFramework === ""net10.0"",
+                        qualifier.targetFramework === ""netstandard2.0"" || qualifier.targetFramework === ""netcoreapp2.0"" || qualifier.targetFramework === ""netcoreapp2.1"" || qualifier.targetFramework === ""netcoreapp2.2"" || qualifier.targetFramework === ""netstandard2.1"" || qualifier.targetFramework === ""netcoreapp3.0"" || qualifier.targetFramework === ""netcoreapp3.1"" || qualifier.targetFramework === ""net5.0"" || qualifier.targetFramework === ""net6.0"" || qualifier.targetFramework === ""net7.0"" || qualifier.targetFramework === ""net8.0"" || qualifier.targetFramework === ""net9.0"" || qualifier.targetFramework === ""net10.0"" || qualifier.targetFramework === ""net11.0"",
                         (
                         )
                         => [importFrom(""Newtonsoft.Json"").pkg]
@@ -207,7 +208,7 @@ export const pkg: Managed.ManagedNugetPackage = (() => {{
             string expectedSpec = $@"import * as NugetDownloader from ""BuildXL.Tools.NugetDownloader"";
 
 export declare const qualifier: {{
-    targetFramework: ""net10"" | ""net11"" | ""net20"" | ""net35"" | ""net40"" | ""net45"" | ""net451"" | ""net452"" | ""net46"" | ""net461"" | ""net462"" | ""net472"" | ""netstandard1.0"" | ""netstandard1.1"" | ""netstandard1.2"" | ""netstandard1.3"" | ""netstandard1.4"" | ""netstandard1.5"" | ""netstandard1.6"" | ""netstandard2.0"" | ""netcoreapp2.0"" | ""netcoreapp2.1"" | ""netcoreapp2.2"" | ""netstandard2.1"" | ""netcoreapp3.0"" | ""netcoreapp3.1"" | ""net5.0"" | ""net6.0"" | ""net7.0"" | ""net8.0"" | ""net9.0"" | ""net10.0"",
+    targetFramework: ""net10"" | ""net11"" | ""net20"" | ""net35"" | ""net40"" | ""net45"" | ""net451"" | ""net452"" | ""net46"" | ""net461"" | ""net462"" | ""net472"" | ""netstandard1.0"" | ""netstandard1.1"" | ""netstandard1.2"" | ""netstandard1.3"" | ""netstandard1.4"" | ""netstandard1.5"" | ""netstandard1.6"" | ""netstandard2.0"" | ""netcoreapp2.0"" | ""netcoreapp2.1"" | ""netcoreapp2.2"" | ""netstandard2.1"" | ""netcoreapp3.0"" | ""netcoreapp3.1"" | ""net5.0"" | ""net6.0"" | ""net7.0"" | ""net8.0"" | ""net9.0"" | ""net10.0"" | ""net11.0"",
     targetRuntime: ""win-x64"" | ""osx-x64"" | ""linux-x64"",
 }};
 
@@ -266,7 +267,7 @@ export const pkg: NugetPackage = {{
             string expectedSpec = $@"import * as NugetDownloader from ""BuildXL.Tools.NugetDownloader"";
 import * as Managed from ""Sdk.Managed"";
 
-export declare const qualifier: {{targetFramework: ""net6.0"" | ""net7.0"" | ""net8.0"" | ""net9.0"" | ""net10.0"", targetRuntime: ""win-x64"" | ""osx-x64"" | ""linux-x64""}};
+export declare const qualifier: {{targetFramework: ""net6.0"" | ""net7.0"" | ""net8.0"" | ""net9.0"" | ""net10.0"" | ""net11.0"", targetRuntime: ""win-x64"" | ""osx-x64"" | ""linux-x64""}};
 
 namespace Contents {{
     export declare const qualifier: {{
@@ -304,6 +305,7 @@ export const pkg: Managed.ManagedNugetPackage = (() => {{
         case ""net8.0"":
         case ""net9.0"":
         case ""net10.0"":
+        case ""net11.0"":
             return Managed.Factory.createNugetPackage(
                 ""TestPkg"",
                 ""1.999"",
@@ -312,7 +314,7 @@ export const pkg: Managed.ManagedNugetPackage = (() => {{
                 [Managed.Factory.createBinaryFromFiles(Contents.all.getFile(r`lib/net7.0/my.dll`))],
                 [
                     ...addIfLazy(
-                        qualifier.targetFramework === ""net7.0"" || qualifier.targetFramework === ""net8.0"" || qualifier.targetFramework === ""net9.0"" || qualifier.targetFramework === ""net10.0"",
+                        qualifier.targetFramework === ""net7.0"" || qualifier.targetFramework === ""net8.0"" || qualifier.targetFramework === ""net9.0"" || qualifier.targetFramework === ""net10.0"" || qualifier.targetFramework === ""net11.0"",
                         (
                         )
                         => []

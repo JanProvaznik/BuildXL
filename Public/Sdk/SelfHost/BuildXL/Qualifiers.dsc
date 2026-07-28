@@ -19,7 +19,7 @@ export interface FullFrameworkQualifier extends Qualifier {
 @@public
 export interface DefaultQualifier extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "net8.0" | "net9.0" | "net10.0";
+    targetFramework: "net8.0" | "net9.0" | "net10.0" | "net11.0";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 
@@ -29,7 +29,7 @@ export interface DefaultQualifier extends Qualifier {
 @@public
 export interface DefaultQualifierWithNet472 extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "net8.0" | "net9.0" | "net10.0" | "net472";
+    targetFramework: "net8.0" | "net9.0" | "net10.0" | "net11.0" | "net472";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 
@@ -39,7 +39,7 @@ export interface DefaultQualifierWithNet472 extends Qualifier {
 @@public
 export interface AllSupportedQualifiers extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "net8.0" | "net9.0" | "net10.0" | "net472" | "netstandard2.0";
+    targetFramework: "net8.0" | "net9.0" | "net10.0" | "net11.0" | "net472" | "netstandard2.0";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 
@@ -55,7 +55,7 @@ export interface PlatformDependentQualifier extends Qualifier {
 @@public
 export interface Net8PlusQualifier extends Qualifier {
     configuration: "debug" | "release";
-    targetFramework: "net8.0" | "net9.0" | "net10.0";
+    targetFramework: "net8.0" | "net9.0" | "net10.0" | "net11.0";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 
@@ -77,6 +77,13 @@ export interface Net9Qualifier extends Qualifier {
 export interface Net10Qualifier extends Qualifier {
     configuration: "debug" | "release";
     targetFramework: "net10.0";
+    targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
+}
+
+@@public
+export interface Net11Qualifier extends Qualifier {
+    configuration: "debug" | "release";
+    targetFramework: "net11.0";
     targetRuntime: "win-x64" | "osx-x64" | "linux-x64";
 }
 

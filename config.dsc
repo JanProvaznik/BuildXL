@@ -436,6 +436,28 @@ config({
                     archiveType: "tgz",
                 },
 
+                // DotNet Core Runtime 11.0.0-preview.6.26359.118 (preview)
+                // Hashes were computed with BuildXL's own VSO0 algorithm and cross-checked by
+                // reproducing the published 10.0.9 hashes above byte for byte.
+                {
+                    moduleName: "DotNet-Runtime.win-x64.11.0",
+                    url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/11.0.0-preview.6.26359.118/dotnet-runtime-11.0.0-preview.6.26359.118-win-x64.zip",
+                    hash: "VSO0:32E4ACD3519CF314EC7F15FB06E1ADB7E87023BAC5D21508378B4B1619047F8600",
+                    archiveType: "zip",
+                },
+                {
+                    moduleName: "DotNet-Runtime.osx-x64.11.0",
+                    url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/11.0.0-preview.6.26359.118/dotnet-runtime-11.0.0-preview.6.26359.118-osx-x64.tar.gz",
+                    hash: "VSO0:86B42F08E0064F98BA060C3E6CAE6E44CD60D504B884E1A23ED0E5AFEB998BCC00",
+                    archiveType: "tgz",
+                },
+                {
+                    moduleName: "DotNet-Runtime.linux-x64.11.0",
+                    url: "https://builds.dotnet.microsoft.com/dotnet/Runtime/11.0.0-preview.6.26359.118/dotnet-runtime-11.0.0-preview.6.26359.118-linux-x64.tar.gz",
+                    hash: "VSO0:F03C03893FCAE5E5368517483989B00B1AD0A35864A6D21291B5B1083F7E6B5400",
+                    archiveType: "tgz",
+                },
+
                 // DotNet Core Runtime 10.0.9
                 {
                     moduleName: "DotNet-Runtime.win-x64.10.0",

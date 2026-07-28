@@ -10,7 +10,8 @@ namespace Authentication {
             Utilities.Core.dll,
             importFrom("Newtonsoft.Json").pkg,
             importFrom("Microsoft.Artifacts.Authentication").pkg,
-            importFrom("Microsoft.Extensions.Logging.Abstractions").pkg,
+            // .NET 11 ships Microsoft.Extensions.Logging.Abstractions in the base shared framework.
+            ...addIf(!BuildXLSdk.isDotNetCore11OrGreater, importFrom("Microsoft.Extensions.Logging.Abstractions").pkg),
             importFrom("Microsoft.Identity.Client.Broker").pkg,
             importFrom("Microsoft.Identity.Client.NativeInterop").pkg,
             importFrom("Microsoft.Identity.Client").pkg,

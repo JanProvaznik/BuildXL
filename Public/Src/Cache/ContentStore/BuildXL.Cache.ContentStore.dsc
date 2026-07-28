@@ -141,13 +141,20 @@ function getWebFrameworkExclusions(): Managed.ManagedNugetPackage[] {
         importFrom("System.Security.Cryptography.Pkcs").pkg,
         importFrom("System.Security.Cryptography.Xml").pkg,
         importFrom("Microsoft.Extensions.DependencyInjection").pkg,
-        importFrom("Microsoft.Extensions.DependencyInjection.Abstractions").pkg,
         importFrom("Microsoft.Extensions.Http").pkg,
         importFrom("Microsoft.Extensions.Logging").pkg,
-        importFrom("Microsoft.Extensions.Logging.Abstractions").pkg,
-        importFrom("Microsoft.Extensions.Options").pkg,
-        importFrom("Microsoft.Extensions.Primitives").pkg,
-        importFrom("Microsoft.Extensions.ObjectPool").pkg
+        importFrom("Microsoft.Extensions.ObjectPool").pkg,
+
+        // .NET 11 moved these out of the ASP.NET Core runtime pack and into the base shared framework
+        // (Microsoft.NETCore.App). On net11 there is nothing left to filter out of the ASP.NET package,
+        // and pulling the standalone NuGet packages back in would duplicate types that the framework
+        // already provides. On earlier frameworks they are still ASP.NET-pack duplicates and belong here.
+        ...addIf(!BuildXLSdk.isDotNetCore11OrGreater,
+            importFrom("Microsoft.Extensions.DependencyInjection.Abstractions").pkg,
+            importFrom("Microsoft.Extensions.Logging.Abstractions").pkg,
+            importFrom("Microsoft.Extensions.Options").pkg,
+            importFrom("Microsoft.Extensions.Primitives").pkg
+        )
     ];
 }
 

@@ -42,7 +42,8 @@ export namespace DropDaemon {
             importFrom("Microsoft.VisualStudio.Services.Client").pkg,
             importFrom("Microsoft.VisualStudio.Services.InteractiveClient").pkg,
             importFrom("Microsoft.Azure.Storage.Common").pkg,
-            importFrom("Microsoft.Extensions.Logging.Abstractions").pkg,
+            // .NET 11 ships Microsoft.Extensions.Logging.Abstractions in the base shared framework.
+            ...addIf(!BuildXLSdk.isDotNetCore11OrGreater, importFrom("Microsoft.Extensions.Logging.Abstractions").pkg),
 
             // We need to reference this even though the codepath which uses the path is never activated
             // because of the way that runtime assemblies are loaded into memory.
