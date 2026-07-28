@@ -267,9 +267,18 @@ function setInternal() {
 # Clears and then populates the 'g_bxlArgs' array with arguments to be passed to 'bxl'.
 # The arguments are decided based on sensible defaults as well as the current values of the 'arg_*' variables.
 function setBxlCmdArgs {
+    # Look this up before building the array. Under 'set -e' a failing command substitution inside an
+    # assignment aborts the script immediately, so a missing dotnet used to end the run with no
+    # diagnostic whatsoever - just the exit code.
+    local dotnetLocation="$(which dotnet || true)"
+    if [[ -z $dotnetLocation ]]; then
+        print_error "Did not find dotnet on your PATH. Install it per https://learn.microsoft.com/dotnet/core/install/ and make sure 'dotnet' is on PATH."
+        exit 1
+    fi
+
     g_bxlCmdArgs=(
         # some environment variables
-        "/p:DOTNET_EXE=$(which dotnet)"
+        "/p:DOTNET_EXE=$dotnetLocation"
         # user-specified config files
         "/c:$MY_DIR/config.dsc"
     )
