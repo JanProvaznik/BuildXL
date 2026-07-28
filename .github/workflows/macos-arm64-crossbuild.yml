@@ -35,8 +35,9 @@ jobs:
       - run: python3 Shared/Scripts/validate-runtime-identifiers.py
 
   # Graph construction only. This evaluates every .dsc under the osx-arm64 qualifier -- type
-  # unions, switch arms, package references, download declarations -- without executing any pip,
-  # so it is the cheapest complete test of the DScript.
+  # unions, switch arms, package references, download declarations -- and schedules the resulting
+  # pips without executing any of them, so it is the cheapest complete test of the DScript.
+  # /phase:Schedule is the last non-executing phase; the engine rejects /phase:Evaluate outright.
   evaluate:
     name: Evaluate osx-arm64 pip graph
     needs: validate-runtime-identifiers
@@ -64,7 +65,7 @@ jobs:
           bash bxl.sh \
             --shared-comp \
             /q:ReleaseDotNetCoreMacArm64 \
-            /phase:Evaluate \
+            /phase:Schedule \
             /logsDirectory:Out/Logs/EvaluateOsxArm64 \
             /forceAddExecutionPermission- \
             /logOutput:FullOutputOnWarningOrError
