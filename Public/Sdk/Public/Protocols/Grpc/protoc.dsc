@@ -11,12 +11,39 @@ const currentHost = Context.getCurrentHost();
 const isHostOsOsx : boolean = currentHost.os === "macOS";
 const isHostOsWin : boolean = currentHost.os === "win";
 const isHostOsLinux : boolean = currentHost.os === "unix";
+const isHostArm64 : boolean = currentHost.cpuArchitecture === "arm64";
 
-const binDir = 
+/**
+ * True when Grpc.Tools carries a tool folder with the given name.
+ *
+ * The package does not ship a folder for every OS/architecture pair, and which pairs are present
+ * changes over time. As of 2.71.0 it carries linux_arm64 but no macosx_arm64, and grpc publishes no
+ * standalone plugin binaries anywhere else, so on an arm64 Mac there is currently nothing native to
+ * run. Asking the package what it holds - rather than hard-coding today's answer - means the arm64
+ * folders get picked up automatically, with no change here, as soon as upstream adds them.
+ */
+function hasToolDir(name: PathAtom) : boolean {
+    const dir = d`${pkgContents.root}/tools/${name}`;
+    return pkgContents.getContent().filter(file => (<File>file).isWithin(dir)).length > 0;
+}
+
+const nativeBinDir =
     isHostOsWin   ? a`windows_x64` :
-    isHostOsOsx   ? a`macosx_x64` : 
-    isHostOsLinux ? a`linux_x64` : 
+    isHostOsOsx   ? (isHostArm64 ? a`macosx_arm64` : a`macosx_x64`) :
+    isHostOsLinux ? (isHostArm64 ? a`linux_arm64`  : a`linux_x64`)  :
     Contract.fail("Unsupported OS");
+
+/**
+ * Where an arm64 host has no native folder to fall back from, the x64 tools are used instead. That
+ * is what every macOS build has done to date, and it only works under emulation (Rosetta 2 on
+ * macOS); without it protoc fails to start at all.
+ */
+const emulatedBinDir =
+    isHostOsWin   ? a`windows_x64` :
+    isHostOsOsx   ? a`macosx_x64` :
+    a`linux_x64`;
+
+const binDir = hasToolDir(nativeBinDir) ? nativeBinDir : emulatedBinDir;
 
 @@public
 export const tool: Transformer.ToolDefinition = {
