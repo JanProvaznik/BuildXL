@@ -367,8 +367,15 @@ function processDeploymentStyle(args: Arguments, targetType: Csc.TargetType, fra
 
         const patchResult = AppPatcher.withQualifier(Shared.TargetFrameworks.MachineQualifier.current).patchBinary({
             binary: cscResult.binary.binary,
-            // Workaround an evaluation issue that is happening for mac builds when qualifier.targetRuntime is passed.
-            targetRuntimeVersion: Context.getCurrentHost().os === "win" ? qualifier.targetRuntime : Shared.TargetFrameworks.MachineQualifier.current.targetRuntime
+            // The application host is the native launcher that runs on the *target* machine, so it
+            // has to match the target runtime. This used to fall back to the machine's own runtime
+            // on any non-Windows host, to work around an evaluation issue reported for mac builds
+            // in a4e8b7f8d (2021). That fallback was invisible for as long as the only non-Windows
+            // cross-build target was the host itself -- a Linux host building linux-x64 and a mac
+            // host building osx-x64 both produced the same value either way. Cross-building
+            // osx-arm64 from Linux is the first case where the two differ, and it produced an
+            // ELF x86-64 `bxl` inside an otherwise correct macOS deployment.
+            targetRuntimeVersion: qualifier.targetRuntime
         });
 
         // When ESRP is enabled, get the patched .exe file and sign it.

@@ -15,16 +15,21 @@ const isMacOS = currentOs === "macOS";
 const isLinuxOS = currentOs === "unix";
 const isWinOS = currentOs === "win";
 
-function contentFilter(file: File): boolean {
-    return isMacOS
-            ? (file.extension === a`.dylib` || file.extension === a`.a` || file.extension === a`.h`)
-            :
-        isLinuxOS
-            ? (file.extension === a`.so` || file.extension === a`.a` || file.extension === a`.o`)
-            :
-        isWinOS
-            ? (file.extension === a`.dll` || file.extension === a`.lib` || file.extension === a`.h`)
-            : Contract.fail("Unknown os: " + currentOs);
+// Which native artifacts to carry out of the apphost package depends on the *target* runtime, not
+// on the host: cross-building for macOS from Linux still has to pick up .dylib rather than .so.
+// This consulted the current host until osx-arm64 made the two differ for the first time.
+function contentFilter(file: File, targetRuntime: Managed.RuntimeVersion): boolean {
+    switch (targetRuntime) {
+        case "win-x64":
+            return file.extension === a`.dll` || file.extension === a`.lib` || file.extension === a`.h`;
+        case "osx-x64":
+        case "osx-arm64":
+            return file.extension === a`.dylib` || file.extension === a`.a` || file.extension === a`.h`;
+        case "linux-x64":
+            return file.extension === a`.so` || file.extension === a`.a` || file.extension === a`.o`;
+        default:
+            Contract.fail("Unknown target runtime: " + targetRuntime);
+    }
 }
 
 // The patcher runs on the *host*, so on an Apple Silicon Mac it has to be an arm64 binary: the
@@ -95,7 +100,7 @@ export function patchBinary(args: Arguments) : Result {
 
     return {
         contents: [
-            ...contents.getContent().filter(f => contentFilter(f)),
+            ...contents.getContent().filter(f => contentFilter(f, args.targetRuntimeVersion)),
         ],
         patchOutputFile: result.getOutputFile(outputPath)
     };

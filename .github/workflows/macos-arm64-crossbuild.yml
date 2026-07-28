@@ -160,6 +160,21 @@ jobs:
             /logsDirectory:Out/Logs/EvaluateOsxArm64 \
             /logOutput:FullOutputOnWarningOrError
 
+      - name: Stage 2a2 - construct the linux-x64 pip graph
+        run: |
+          set -euo pipefail
+          # Regression guard for the host platform. The apphost now follows the target runtime rather
+          # than the machine's, undoing a 2021 workaround whose comment blamed an evaluation issue,
+          # so the cheapest proof that nothing regressed is to evaluate the host qualifier too.
+          bash bxl.sh \
+            --use-dev \
+            --shared-comp \
+            /q:ReleaseLinux \
+            /phase:Schedule \
+            /forceAddExecutionPermission- \
+            /logsDirectory:Out/Logs/EvaluateLinux \
+            /logOutput:FullOutputOnWarningOrError
+
       - name: Stage 2b - cross-build the osx-arm64 deployment
         run: |
           set -euo pipefail
@@ -184,9 +199,32 @@ jobs:
           echo "$count files, $(du -sh "$out" | cut -f1)"
           test "$count" -gt 0 || { echo "::error::$out is empty"; exit 1; }
           test -f "$out/bxl" || { echo "::error::no bxl in $out"; exit 1; }
+
           echo "=== architecture of the produced binaries ==="
-          file "$out/bxl" || true
+          file "$out/bxl"
           find "$out" -name "*.dylib" | head -5 | while read -r f; do file "$f"; done
+
+          # Asserted, not merely printed. The first cross-build produced a complete macOS deployment
+          # whose apphost was an ELF x86-64 binary, because the apphost was being selected from the
+          # machine's runtime rather than the target's. Nothing else in the build noticed.
+          apphost=$(file -b "$out/bxl")
+          case "$apphost" in
+            *Mach-O*arm64*) echo "OK: bxl is a Mach-O arm64 executable" ;;
+            *) echo "::error::bxl is not a Mach-O arm64 executable: $apphost"; exit 1 ;;
+          esac
+
+          # The runtime that ships next to it has to agree.
+          coreclr=$(file -b "$out/libcoreclr.dylib")
+          case "$coreclr" in
+            *Mach-O*arm64*) echo "OK: libcoreclr.dylib is Mach-O arm64" ;;
+            *) echo "::error::libcoreclr.dylib is not Mach-O arm64: $coreclr"; exit 1 ;;
+          esac
+
+          # Nothing built for the host may leak into a target deployment.
+          if find "$out" -maxdepth 1 -type f -exec file {} + | grep -E ": *ELF" ; then
+            echo "::error::ELF binaries found in an osx-arm64 deployment"; exit 1
+          fi
+          echo "OK: no ELF binaries in the deployment"
 
       - name: Collect errors on failure
         if: failure()
