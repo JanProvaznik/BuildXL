@@ -93,6 +93,11 @@ export function patchBinary(args: Arguments) : Result {
         tool: patcher,
         arguments: arguments,
         workingDirectory: wd,
+        // The patcher ad-hoc signs its output on macOS, and codesign writes a .cstemp sibling of the
+        // file it is signing, so the signing has to happen somewhere scratch. Without a declared temp
+        // directory a pip's TMPDIR points at RestrictedTemp, where BuildXL denies every access by
+        // design.
+        tempDirectory: Context.getTempDirectory("AppHostPatcher"),
         outputs: [
             outputPath,
         ],
