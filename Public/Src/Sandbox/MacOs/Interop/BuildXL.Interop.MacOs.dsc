@@ -12,13 +12,11 @@ namespace InteropLibrary {
     const isMacOsHost = Context.getCurrentHost().os === "macOS";
 
     const clangTool : Transformer.ToolDefinition = {
-        exe: f`/usr/bin/clang`,
+        exe: MacOsClang.clang,
         prepareTempDirectory: true,
         dependsOnCurrentHostOSDirectories: true,
-        untrackedDirectoryScopes: [
-            d`/Library/Developer`,
-            d`/Applications/Xcode.app`
-        ]
+        untrackedDirectoryScopes: MacOsClang.toolchainScopes,
+        untrackedDirectories: MacOsClang.toolchainProbedDirectories
     };
 
     const sources : File[] = [
@@ -29,6 +27,12 @@ namespace InteropLibrary {
     ];
 
     const headers : File[] = globR(d`Posix`, "*.h");
+
+    // See BuildXL.Sandbox.MacOs.dsc: naming the headers covers what the compiler reads, sealing the
+    // directory covers the far larger number of paths it probes and does not find.
+    const includeDirectorySeals : StaticDirectory[] = isMacOsHost
+        ? [Transformer.sealSourceDirectory(d`Posix`, Transformer.SealSourceDirectoryOption.allDirectories)]
+        : [];
 
     /**
      * arm64 macOS did not exist before macOS 11, so a deployment target older than that is not
@@ -70,6 +74,7 @@ namespace InteropLibrary {
             Cmd.args(sources.map(Artifact.input)),
             Cmd.argument("-dynamiclib"),
             Cmd.option("-arch ", targetArchitecture),
+            Cmd.option("-isysroot ", Artifact.none(MacOsClang.sdkRoot)),
             Cmd.argument(`-mmacosx-version-min=${minimumOsVersion}`),
             // The managed side resolves the library by name from the deployment directory, so the
             // install name has to be @rpath-relative rather than an absolute build path.
@@ -87,7 +92,17 @@ namespace InteropLibrary {
             // command line asks it to precompile that header, which makes the invocation produce
             // more than one output and fails with "cannot specify -o when generating multiple
             // output files".
-            dependencies: headers,
+            dependencies: [...headers, ...includeDirectorySeals],
+            // ld resolves the @rpath install name against its own search list before writing it, and
+            // with no -rpath on the command line the remaining candidate is the literal "rpath/<name>"
+            // relative to the working directory. The stat is real - it reproduces outside BuildXL - and
+            // the sandbox reports it, so it is declared rather than argued away. The working directory
+            // itself is probed for the same reason. Both are the pip's own scratch space, which is why
+            // untracking them costs nothing: no other pip can observe what is under it.
+            unsafe: {
+                untrackedPaths: [outDir],
+                untrackedScopes: [d`${outDir}/rpath`],
+            },
             tags: ["compile", "macos", "interop"],
         });
 

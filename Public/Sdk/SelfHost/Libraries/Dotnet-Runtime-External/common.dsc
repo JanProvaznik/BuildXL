@@ -13,6 +13,17 @@ export function createPublicDotNetRuntime(v3Runtime : StaticDirectory, v2Runtime
         return Transformer.sealDirectory(dotNetRuntimeRoot, []);
     }
 
+    // With only a V3 runtime the copy is the identity: the result is byte-for-byte the source directory.
+    // Returning the source directly saves materializing a second copy of the whole runtime (~190 files
+    // per version, per qualifier), and - the reason this is not merely an optimization - it removes the
+    // platform copy tool from the dependency graph. On macOS that tool is /usr/bin/rsync, which is SIP
+    // protected: no sandbox can observe it, so the pip's shared opaque output would be recorded with no
+    // contents at all and every downstream assertExistence would fail.
+    // CODESYNC: Documentation/Wiki/MacOsSandbox.md, "Processes that cannot be observed".
+    if (v2Runtime === undefined) {
+        return v3Runtime;
+    }
+
     let dotNetRuntimeV3 : SharedOpaqueDirectory = undefined;
     let dotNetRuntimeV2 : SharedOpaqueDirectory = undefined;
 

@@ -65,6 +65,16 @@ public:
     const char *BackendName() const override { return "dyld-interpose"; }
 
     /** Records lost inside a process, detected as a gap in that process's own sequence. */
+    /**
+     * Whether dyld will inject into this executable.
+     *
+     * False for anything SIP protected or setuid, where dyld both refuses to load the library and
+     * erases DYLD_INSERT_LIBRARIES from the environment, so the loss is inherited by everything the
+     * process goes on to start. Exposed so the broker can say that plainly when the pip's own tool is
+     * one of them, rather than leaving an operator to infer it from a lifecycle taint.
+     */
+    static bool IsInjectable(const std::string &executablePath, std::string &reason);
+
     uint64_t BackendReportedLosses() const override { return m_recordGaps.load(std::memory_order_relaxed); }
 
     /** The path the injected library must connect to. */
@@ -89,6 +99,13 @@ private:
     void AcceptLoop();
     void ReadLoop(int descriptor);
     void OnConnectionClosed();
+
+    /**
+     * Why DefaultSocketPath gave up, so Start() can report the real reason rather than a bare bind
+     * failure. Declared before m_socketPath on purpose: members are initialized in declaration order
+     * and m_socketPath's initializer takes this by reference.
+     */
+    std::string m_socketPathError;
 
     std::string m_socketPath;
     bool m_ownsSocketPath = false;

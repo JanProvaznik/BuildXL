@@ -67,6 +67,16 @@ namespace MsBuildGraphBuilder {
         runCrossgenIfSupported: false,
     });
 
+    const dotNetCoreContents = [
+        {
+            subfolder: r`dotnetcore`,
+            contents: [
+                    $.withQualifier({ targetFramework: Managed.TargetFrameworks.DefaultTargetFramework })
+                    .MsBuildGraphBuilder.exe
+                ]
+        }
+    ];
+
     @@public
     export const deployment : Deployment.Definition = { contents: [{
         subfolder: r`MsBuildGraphBuilder`,
@@ -78,13 +88,18 @@ namespace MsBuildGraphBuilder {
                         .MsBuildGraphBuilder.exe
                     ]
             },
-            {
-                subfolder: r`dotnetcore`,
-                contents: [
-                        $.withQualifier({ targetFramework: Managed.TargetFrameworks.DefaultTargetFramework })
-                        .MsBuildGraphBuilder.exe
-                    ]
-            }
+            ...dotNetCoreContents,
         ]
+    }]};
+
+    /**
+     * Off Windows there is no full-framework MSBuild to drive, so only the dotnet-core builder is
+     * deployed. Deploying the net472 one there would also mean building it, which needs reference
+     * assemblies the non-Windows legs do not carry.
+     */
+    @@public
+    export const dotNetCoreOnlyDeployment : Deployment.Definition = { contents: [{
+        subfolder: r`MsBuildGraphBuilder`,
+        contents: dotNetCoreContents
     }]};
 }

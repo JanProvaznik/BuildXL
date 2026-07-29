@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <copyfile.h>
 #include <sys/attr.h>
 #include <sys/clonefile.h>
 #include <sys/socket.h>
@@ -529,6 +530,65 @@ static void ReportExec(uint16_t op, const char *path)
     t_reporting = 0;
 }
 
+static void ReportTwoAt(
+    uint16_t op,
+    int sourceFd,
+    const char *source,
+    int destinationFd,
+    const char *destination,
+    int result,
+    int capturedErrno)
+{
+    if (t_reporting || g_socket < 0)
+    {
+        return;
+    }
+
+    t_reporting = 1;
+
+    char resolvedSource[PATH_MAX + 64];
+    char resolvedDestination[PATH_MAX + 64];
+    const size_t sourceLength = AbsolutizeAt(sourceFd, source, resolvedSource, sizeof(resolvedSource));
+    const size_t destinationLength =
+        AbsolutizeAt(destinationFd, destination, resolvedDestination, sizeof(resolvedDestination));
+    SendRecord(
+        kRecordEvent,
+        op,
+        OutcomeFlags(result),
+        result == 0 ? 0 : capturedErrno,
+        resolvedSource,
+        sourceLength,
+        resolvedDestination,
+        destinationLength);
+
+    t_reporting = 0;
+}
+
+/**
+ * Declares that something happened which the broker cannot model, so the pip must not be cached.
+ *
+ * Used for operations that invalidate the meaning of paths already reported rather than merely
+ * adding one more access. Reporting them as ordinary accesses would be worse than not reporting them
+ * at all, because the report would look complete.
+ */
+static void ReportUnobservable(const char *path, const char *reason)
+{
+    (void)reason;
+
+    if (t_reporting || g_socket < 0)
+    {
+        return;
+    }
+
+    t_reporting = 1;
+
+    char resolved[PATH_MAX + 64];
+    const size_t length = Absolutize(path, resolved, sizeof(resolved));
+    SendRecord(kRecordUnobservableChild, kOpUnknown, 0, 0, resolved, length, NULL, 0);
+
+    t_reporting = 0;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Interposers
 // ---------------------------------------------------------------------------------------------
@@ -808,6 +868,211 @@ static int bxl_posix_spawnp(
     return posix_spawnp(pid, file, fileActions, attributes, argv, envp);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Coverage completion
+// ---------------------------------------------------------------------------------------------
+//
+// Everything below was added after enumerating every path-affecting export of
+// libsystem_kernel.dylib and comparing it against what was interposed. Guessing which entry points
+// a build actually uses is not a completeness argument; the list of what the kernel offers is.
+// validate-interpose-coverage.py runs that comparison as a pip so this cannot drift.
+//
+// Note that several higher-level libc functions need no interposer of their own: dyld rebinds
+// references made from inside libSystem too, so glob(), scandir(), ftw(), execl(), system() and
+// popen() reach the interposed opendir/stat/execve. That is measured, not assumed -- see
+// InterposeCoverageTests.
+
+static int bxl_getattrlist(const char *path, void *list, void *buffer, size_t size, unsigned int options)
+{
+    const int result = getattrlist(path, list, buffer, size, options);
+    ReportOne(kOpStat, path, result, errno);
+    return result;
+}
+
+static int bxl_setattrlist(const char *path, void *list, void *buffer, size_t size, unsigned int options)
+{
+    const int result = setattrlist(path, list, buffer, size, options);
+    ReportOne(kOpSetFlags, path, result, errno);
+    return result;
+}
+
+static int bxl_getattrlistat(int fd, const char *path, void *list, void *buffer, size_t size, unsigned long options)
+{
+    const int result = getattrlistat(fd, path, list, buffer, size, options);
+    ReportOneAt(kOpStat, fd, path, result, errno);
+    return result;
+}
+
+static int bxl_setattrlistat(int fd, const char *path, void *list, void *buffer, size_t size, uint32_t options)
+{
+    const int result = setattrlistat(fd, path, list, buffer, size, options);
+    ReportOneAt(kOpSetFlags, fd, path, result, errno);
+    return result;
+}
+
+static int bxl_renameat(int fromFd, const char *from, int toFd, const char *to)
+{
+    const int result = renameat(fromFd, from, toFd, to);
+    ReportTwoAt(kOpRename, fromFd, from, toFd, to, result, errno);
+    return result;
+}
+
+static int bxl_renameatx_np(int fromFd, const char *from, int toFd, const char *to, unsigned int flags)
+{
+    const int result = renameatx_np(fromFd, from, toFd, to, flags);
+    ReportTwoAt(kOpRename, fromFd, from, toFd, to, result, errno);
+    return result;
+}
+
+static int bxl_linkat(int fromFd, const char *from, int toFd, const char *to, int flag)
+{
+    const int result = linkat(fromFd, from, toFd, to, flag);
+    ReportTwoAt(kOpLink, fromFd, from, toFd, to, result, errno);
+    return result;
+}
+
+static int bxl_symlinkat(const char *target, int fd, const char *path)
+{
+    const int result = symlinkat(target, fd, path);
+    ReportOneAt(kOpSymlink, fd, path, result, errno);
+    return result;
+}
+
+static ssize_t bxl_readlinkat(int fd, const char *path, char *buffer, size_t size)
+{
+    const ssize_t result = readlinkat(fd, path, buffer, size);
+    ReportOneAt(kOpReadLink, fd, path, result < 0 ? -1 : 0, errno);
+    return result;
+}
+
+static int bxl_fchmodat(int fd, const char *path, mode_t mode, int flag)
+{
+    const int result = fchmodat(fd, path, mode, flag);
+    ReportOneAt(kOpChMod, fd, path, result, errno);
+    return result;
+}
+
+static int bxl_fchownat(int fd, const char *path, uid_t owner, gid_t group, int flag)
+{
+    const int result = fchownat(fd, path, owner, group, flag);
+    ReportOneAt(kOpChOwn, fd, path, result, errno);
+    return result;
+}
+
+static int bxl_lchown(const char *path, uid_t owner, gid_t group)
+{
+    const int result = lchown(path, owner, group);
+    ReportOne(kOpChOwn, path, result, errno);
+    return result;
+}
+
+static int bxl_lchflags(const char *path, unsigned int flags)
+{
+    const int result = lchflags(path, flags);
+    ReportOne(kOpSetFlags, path, result, errno);
+    return result;
+}
+
+static int bxl_utimes(const char *path, const struct timeval times[2])
+{
+    const int result = utimes(path, times);
+    ReportOne(kOpUTimes, path, result, errno);
+    return result;
+}
+
+static int bxl_lutimes(const char *path, const struct timeval times[2])
+{
+    const int result = lutimes(path, times);
+    ReportOne(kOpUTimes, path, result, errno);
+    return result;
+}
+
+static int bxl_copyfile(const char *from, const char *to, copyfile_state_t state, copyfile_flags_t flags)
+{
+    const int result = copyfile(from, to, state, flags);
+    ReportTwo(kOpCopyFile, from, to, result, errno);
+    return result;
+}
+
+static int bxl_clonefileat(int fromFd, const char *from, int toFd, const char *to, unsigned int flags)
+{
+    const int result = clonefileat(fromFd, from, toFd, to, flags);
+    ReportTwoAt(kOpCloneFile, fromFd, from, toFd, to, result, errno);
+    return result;
+}
+
+static int bxl_exchangedata(const char *first, const char *second, unsigned int options)
+{
+    const int result = exchangedata(first, second, options);
+    ReportTwo(kOpRename, first, second, result, errno);
+    return result;
+}
+
+static int bxl_mkfifo(const char *path, mode_t mode)
+{
+    const int result = mkfifo(path, mode);
+    ReportOne(kOpCreate, path, result, errno);
+    return result;
+}
+
+static int bxl_mkfifoat(int fd, const char *path, mode_t mode)
+{
+    const int result = mkfifoat(fd, path, mode);
+    ReportOneAt(kOpCreate, fd, path, result, errno);
+    return result;
+}
+
+static int bxl_mknod(const char *path, mode_t mode, dev_t dev)
+{
+    const int result = mknod(path, mode, dev);
+    ReportOne(kOpCreate, path, result, errno);
+    return result;
+}
+
+/**
+ * The modern bulk directory enumeration call. Reported as a directory read against the descriptor's
+ * path: BuildXL models enumeration per directory, so the individual entries returned do not need to
+ * be reported, but the fact that the directory was enumerated does.
+ */
+static int bxl_getattrlistbulk(int fd, void *list, void *buffer, size_t size, uint64_t options)
+{
+    const int result = getattrlistbulk(fd, list, buffer, size, options);
+    ReportOneAt(kOpReadDir, fd, "", result < 0 ? -1 : 0, errno);
+    return result;
+}
+
+static int bxl_mknodat(int fd, const char *path, mode_t mode, dev_t dev)
+{
+    const int result = mknodat(fd, path, mode, dev);
+    ReportOneAt(kOpCreate, fd, path, result, errno);
+    return result;
+}
+
+static int bxl_statfs(const char *path, struct statfs *out)
+{
+    const int result = statfs(path, out);
+    ReportOne(kOpStat, path, result, errno);
+    return result;
+}
+
+static long bxl_pathconf(const char *path, int name)
+{
+    const long result = pathconf(path, name);
+    ReportOne(kOpStat, path, result < 0 ? -1 : 0, errno);
+    return result;
+}
+
+/**
+ * chroot changes what every subsequent absolute path means, so every path already reported and every
+ * path still to come is measured against a root the broker does not know. There is no way to report
+ * that correctly, so it is reported as unmodellable and the pip is not cached.
+ */
+static int bxl_chroot(const char *path)
+{
+    ReportUnobservable(path, "chroot changes path resolution for the rest of the process");
+    return chroot(path);
+}
+
 BXL_INTERPOSE(bxl_open, open)
 BXL_INTERPOSE(bxl_open_nocancel, bxl_real_open_nocancel)
 BXL_INTERPOSE(bxl_openat, openat)
@@ -840,3 +1105,29 @@ BXL_INTERPOSE(bxl_chdir, chdir)
 BXL_INTERPOSE(bxl_execve, execve)
 BXL_INTERPOSE(bxl_posix_spawn, posix_spawn)
 BXL_INTERPOSE(bxl_posix_spawnp, posix_spawnp)
+BXL_INTERPOSE(bxl_getattrlist, getattrlist)
+BXL_INTERPOSE(bxl_setattrlist, setattrlist)
+BXL_INTERPOSE(bxl_getattrlistat, getattrlistat)
+BXL_INTERPOSE(bxl_setattrlistat, setattrlistat)
+BXL_INTERPOSE(bxl_renameat, renameat)
+BXL_INTERPOSE(bxl_renameatx_np, renameatx_np)
+BXL_INTERPOSE(bxl_linkat, linkat)
+BXL_INTERPOSE(bxl_symlinkat, symlinkat)
+BXL_INTERPOSE(bxl_readlinkat, readlinkat)
+BXL_INTERPOSE(bxl_fchmodat, fchmodat)
+BXL_INTERPOSE(bxl_fchownat, fchownat)
+BXL_INTERPOSE(bxl_lchown, lchown)
+BXL_INTERPOSE(bxl_lchflags, lchflags)
+BXL_INTERPOSE(bxl_utimes, utimes)
+BXL_INTERPOSE(bxl_lutimes, lutimes)
+BXL_INTERPOSE(bxl_copyfile, copyfile)
+BXL_INTERPOSE(bxl_clonefileat, clonefileat)
+BXL_INTERPOSE(bxl_exchangedata, exchangedata)
+BXL_INTERPOSE(bxl_mkfifo, mkfifo)
+BXL_INTERPOSE(bxl_mkfifoat, mkfifoat)
+BXL_INTERPOSE(bxl_mknod, mknod)
+BXL_INTERPOSE(bxl_statfs, statfs)
+BXL_INTERPOSE(bxl_pathconf, pathconf)
+BXL_INTERPOSE(bxl_chroot, chroot)
+BXL_INTERPOSE(bxl_getattrlistbulk, getattrlistbulk)
+BXL_INTERPOSE(bxl_mknodat, mknodat)

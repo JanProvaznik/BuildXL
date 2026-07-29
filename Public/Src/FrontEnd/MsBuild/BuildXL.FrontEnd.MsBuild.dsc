@@ -8,6 +8,14 @@ import { NetFx } from "Sdk.BuildXL";
 import {Transformer} from "Sdk.Transformers";
 
 namespace MsBuild {
+    /**
+     * The full-framework pieces (the net472 VBCS logger and the net472 graph builder) only make sense
+     * where there is a full-framework MSBuild to drive. Off Windows the resolver runs the dotnet-core
+     * MSBuild, so only the dotnet-core pieces are deployed - and deploying the net472 ones there would
+     * also mean building them.
+     */
+    const isWindowsRuntime = qualifier.targetRuntime === "win-x64";
+
     @@public
     export const dll = BuildXLSdk.library({
         assemblyName: "BuildXL.FrontEnd.MsBuild",
@@ -40,11 +48,11 @@ namespace MsBuild {
         runtimeContent: [
             // CODESYNC: \Public\Src\IDE\VsCode\BuildXL.IDE.VsCode.dsc 
             // We exclude the VbCsCompiler from the VsCode extension to save space.
-            {
+            ...addIfLazy(isWindowsRuntime, () => [{
                 subfolder: r`tools/vbcslogger/net472`,
                 contents: [importFrom("BuildXL.Tools").VBCSCompilerLogger
                     .withQualifier({ targetFramework: "net472" }).dll]
-            },
+            }]),
             {
                 subfolder: r`tools/vbcslogger/dotnetcore`,
                 // CODESYNC: qualifier in Public\Src\Tools\VBCSCompilerLogger\VBCSCompilerLogger.dsc
@@ -56,9 +64,12 @@ namespace MsBuild {
                 subfolder: r`tools`,
                 // For the dotnet case, we are only deploying the tool for net9
                 // TODO: Remove condition when we stop building for other .net versions
-                contents: [qualifier.targetFramework === "net8.0" || qualifier.targetFramework === "net10.0" || qualifier.targetFramework === "net11.0"
-                    ? importFrom("BuildXL.Tools").MsBuildGraphBuilder.withQualifier({targetFramework: "net9.0"}).deployment
-                    : importFrom("BuildXL.Tools").MsBuildGraphBuilder.deployment],
+                contents: [
+                    !isWindowsRuntime
+                        ? importFrom("BuildXL.Tools").MsBuildGraphBuilder.withQualifier({targetFramework: "net9.0"}).dotNetCoreOnlyDeployment
+                    : qualifier.targetFramework === "net8.0" || qualifier.targetFramework === "net10.0" || qualifier.targetFramework === "net11.0"
+                        ? importFrom("BuildXL.Tools").MsBuildGraphBuilder.withQualifier({targetFramework: "net9.0"}).deployment
+                        : importFrom("BuildXL.Tools").MsBuildGraphBuilder.deployment],
             }
         ]
     });

@@ -99,23 +99,55 @@ bool ReadFully(int descriptor, void *buffer, size_t length)
     return true;
 }
 
-std::string DefaultSocketPath()
+/**
+ * Where the control socket lives.
+ *
+ * Not in the pip's temp directory, which is the obvious choice and does not work: sockaddr_un.sun_path
+ * is 104 bytes on macOS, and BuildXL's object directory paths routinely exceed that on their own. The
+ * first real build under this backend failed on exactly that, for every pip.
+ *
+ * TMPDIR is no better - macOS points it at /var/folders/<2>/<30ish>/T/ - so the socket goes in a
+ * per-user directory directly under /tmp, which keeps the whole path around 40 bytes. The socket is a
+ * control channel rather than a build artifact, so it has no reason to live with the pip's outputs.
+ *
+ * /tmp is world writable with the sticky bit, so the directory is created 0700 and its ownership and
+ * mode are verified before it is used. Another user cannot pre-create it and read the build's file
+ * access stream, and if one has, this fails rather than proceeding.
+ */
+std::string DefaultSocketPath(std::string &errorMessage)
 {
-    const char *temporary = getenv("TMPDIR");
-    std::string directory = temporary != nullptr && *temporary != '\0' ? temporary : "/tmp";
-    if (!directory.empty() && directory.back() == '/')
+    const std::string directory = "/tmp/.bxl-sandbox-" + std::to_string(getuid());
+
+    if (mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST)
     {
-        directory.pop_back();
+        errorMessage = "cannot create '" + directory + "': " + strerror(errno);
+        return std::string();
     }
 
-    // The pid keeps concurrent brokers - BuildXL runs one per executing pip - from colliding.
-    return directory + "/bxl-interpose-" + std::to_string(getpid()) + ".sock";
+    struct stat info;
+    if (lstat(directory.c_str(), &info) != 0)
+    {
+        errorMessage = "cannot stat '" + directory + "': " + strerror(errno);
+        return std::string();
+    }
+
+    if (!S_ISDIR(info.st_mode) || info.st_uid != getuid() || (info.st_mode & (S_IRWXG | S_IRWXO)) != 0)
+    {
+        errorMessage = "'" + directory + "' is not a private directory owned by this user";
+        return std::string();
+    }
+
+    // The pid keeps concurrent brokers - BuildXL runs one per executing pip - from colliding, and the
+    // monotonic counter keeps a recycled pid from reusing a path a previous broker left behind.
+    static std::atomic<uint64_t> instance{0};
+    return directory + "/i" + std::to_string(getpid()) + "-"
+        + std::to_string(instance.fetch_add(1, std::memory_order_relaxed)) + ".s";
 }
 
 } // namespace
 
 InterposeIngress::InterposeIngress(std::string socketPath)
-    : m_socketPath(socketPath.empty() ? DefaultSocketPath() : std::move(socketPath))
+    : m_socketPath(socketPath.empty() ? DefaultSocketPath(m_socketPathError) : std::move(socketPath))
 {
     m_broker.pid = static_cast<int32_t>(getpid());
     m_broker.pidversion = ProcessStartSeconds(getpid());
@@ -133,9 +165,16 @@ bool InterposeIngress::Start(EventHandler handler, std::string &errorMessage)
     struct sockaddr_un address;
     memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
+    if (m_socketPath.empty())
+    {
+        errorMessage = m_socketPathError.empty() ? "no interpose socket path could be chosen" : m_socketPathError;
+        return false;
+    }
+
     if (m_socketPath.size() >= sizeof(address.sun_path))
     {
-        errorMessage = "the interpose socket path is longer than sockaddr_un permits: " + m_socketPath;
+        errorMessage = "the interpose socket path is longer than the " + std::to_string(sizeof(address.sun_path))
+            + " bytes sockaddr_un permits: " + m_socketPath;
         return false;
     }
 
@@ -347,6 +386,42 @@ bool InterposeIngress::WaitForConnectionsToDrain(std::chrono::milliseconds timeo
 {
     std::unique_lock<std::mutex> guard(m_connectionMutex);
     return m_connectionIdle.wait_for(guard, timeout, [this] { return m_activeConnections == 0; });
+}
+
+bool InterposeIngress::IsInjectable(const std::string &executablePath, std::string &reason)
+{
+    reason.clear();
+
+    if (executablePath.empty())
+    {
+        return true;
+    }
+
+    struct stat info;
+    if (stat(executablePath.c_str(), &info) != 0)
+    {
+        // PATH resolution happens in posix_spawnp, so a bare name is not evidence of anything.
+        return true;
+    }
+
+    if ((info.st_flags & SF_RESTRICTED) != 0)
+    {
+        reason = "'" + executablePath + "' is protected by System Integrity Protection, so dyld will "
+            "not inject the observation library into it and removes DYLD_INSERT_LIBRARIES from its "
+            "environment, which means its children cannot be observed either. Point the pip at the "
+            "real tool rather than at a /usr/bin stub, or grant the broker the Endpoint Security "
+            "entitlement";
+        return false;
+    }
+
+    if ((info.st_mode & (S_ISUID | S_ISGID)) != 0)
+    {
+        reason = "'" + executablePath + "' is setuid or setgid, so dyld will not inject the "
+            "observation library into it";
+        return false;
+    }
+
+    return true;
 }
 
 bool InterposeIngress::EmitMarker(const std::string &noncePath)

@@ -518,6 +518,21 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &terminationAction, nullptr);
 
     // Own process group, so the whole tree can be waited on and signalled as a unit.
+    // Said before the spawn rather than inferred from the taint afterwards. A SIP protected tool
+    // produces a correct but unhelpful LifecycleNotClosed: the pip is not cached, which is right, but
+    // nothing tells the operator that the cause is the executable they chose and that it is fixable.
+    if (backendChoice == "interpose")
+    {
+        std::string reason;
+        if (!InterposeIngress::IsInjectable(argv[1], reason))
+        {
+            sink.WriteDebugMessage(
+                buildxl::linux::DebugEventSeverity::kWarning,
+                static_cast<int32_t>(getpid()),
+                "macOS sandbox cannot observe this pip: " + reason);
+        }
+    }
+
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);

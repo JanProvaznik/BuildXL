@@ -31,9 +31,10 @@ namespace Factory {
             Lage.dll,
             Ninja.dll,
             Nx.dll,
-            ...addIfLazy(qualifier.targetRuntime === "win-x64", () => [            
-                MsBuild.dll,               
-            ]),
+            // The MSBuild frontend runs MSBuild itself as the pip's tool, so it works anywhere MSBuild
+            // does. Off Windows that means the dotnet-core MSBuild, which the resolver already knows
+            // how to drive (msBuildRuntime: "DotNetCore"); only the deployment was Windows-only.
+            MsBuild.dll,
         ],
         internalsVisibleTo: [
             "IntegrationTest.BuildXL.Scheduler",

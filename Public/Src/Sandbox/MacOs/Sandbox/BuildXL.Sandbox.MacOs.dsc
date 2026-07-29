@@ -12,23 +12,19 @@ namespace EndpointSecuritySandbox {
     const isMacOsHost = Context.getCurrentHost().os === "macOS";
 
     const clangCTool : Transformer.ToolDefinition = {
-        exe: f`/usr/bin/clang`,
+        exe: MacOsClang.clang,
         prepareTempDirectory: true,
         dependsOnCurrentHostOSDirectories: true,
-        untrackedDirectoryScopes: [
-            d`/Library/Developer`,
-            d`/Applications/Xcode.app`
-        ]
+        untrackedDirectoryScopes: MacOsClang.toolchainScopes,
+        untrackedDirectories: MacOsClang.toolchainProbedDirectories
     };
 
     const clangTool : Transformer.ToolDefinition = {
-        exe: f`/usr/bin/clang++`,
+        exe: MacOsClang.clangxx,
         prepareTempDirectory: true,
         dependsOnCurrentHostOSDirectories: true,
-        untrackedDirectoryScopes: [
-            d`/Library/Developer`,
-            d`/Applications/Xcode.app`
-        ]
+        untrackedDirectoryScopes: MacOsClang.toolchainScopes,
+        untrackedDirectories: MacOsClang.toolchainProbedDirectories
     };
 
     const sandboxRoot = d`.`;
@@ -95,6 +91,21 @@ namespace EndpointSecuritySandbox {
     ];
 
     /**
+     * The include directories, sealed so the compiler's search is allowed rather than merely tolerated.
+     *
+     * Naming the headers as file dependencies covers what clang *reads*, but a header search is mostly
+     * made of probes for files that are not there: resolving one #include <string> against six -I paths
+     * produces five misses, and under a real sandbox every one of those is an undeclared access. Under
+     * /sandboxKind:none they were invisible, which is why this spec appeared to be correct for as long
+     * as nothing was watching. A sealed source directory is the declaration that covers both the hits
+     * and the misses, and it still fingerprints on the files actually accessed rather than on the whole
+     * tree, so it costs no precision.
+     */
+    const includeDirectorySeals : StaticDirectory[] = isMacOsHost
+        ? includeDirectories.map(dir => Transformer.sealSourceDirectory(dir, Transformer.SealSourceDirectoryOption.allDirectories))
+        : [];
+
+    /**
      * Endpoint Security is only available from macOS 27, which is where es_new_descendants_client was
      * introduced. Older releases have no API that can observe a process tree soundly, so there is
      * nothing to fall back to and the minimum is a hard one.
@@ -149,6 +160,7 @@ namespace EndpointSecuritySandbox {
             Cmd.option("-o ", Artifact.output(outFile)),
             Cmd.args([...sharedSources, ...brokerSources].map(Artifact.input)),
             Cmd.option("-arch ", targetArchitecture),
+            Cmd.option("-isysroot ", Artifact.none(MacOsClang.sdkRoot)),
             Cmd.argument("-std=c++17"),
             // Endpoint Security's client handler is a block, so blocks must be enabled.
             Cmd.argument("-fblocks"),
@@ -171,7 +183,17 @@ namespace EndpointSecuritySandbox {
             // command line asks it to precompile that header, which makes the invocation produce
             // more than one output and fails with "cannot specify -o when generating multiple
             // output files".
-            dependencies: headers,
+            dependencies: [...headers, ...includeDirectorySeals],
+            // ld resolves the @rpath install name against its own search list before writing it, and
+            // with no -rpath on the command line the remaining candidate is the literal "rpath/<name>"
+            // relative to the working directory. The stat is real - it reproduces outside BuildXL - and
+            // the sandbox reports it, so it is declared rather than argued away. The working directory
+            // itself is probed for the same reason. Both are the pip's own scratch space, which is why
+            // untracking them costs nothing: no other pip can observe what is under it.
+            unsafe: {
+                untrackedPaths: [outDir],
+                untrackedScopes: [d`${outDir}/rpath`],
+            },
             tags: ["compile", "macos", "sandbox"],
         });
 
@@ -187,6 +209,7 @@ namespace EndpointSecuritySandbox {
             Cmd.option("-o ", Artifact.output(outFile)),
             Cmd.argument(Artifact.input(f`../Interpose/bxl-interpose.c`)),
             Cmd.option("-arch ", targetArchitecture),
+            Cmd.option("-isysroot ", Artifact.none(MacOsClang.sdkRoot)),
             Cmd.argument("-std=c11"),
             Cmd.argument(`-mmacosx-version-min=${minimumOsVersion}`),
             Cmd.argument("-D_DARWIN_C_SOURCE"),
@@ -205,7 +228,17 @@ namespace EndpointSecuritySandbox {
             tool: clangCTool,
             workingDirectory: outDir,
             arguments: args,
-            dependencies: [f`../Interpose/InterposeProtocol.h`],
+            dependencies: [f`../Interpose/InterposeProtocol.h`, ...includeDirectorySeals],
+            // ld resolves the @rpath install name against its own search list before writing it, and
+            // with no -rpath on the command line the remaining candidate is the literal "rpath/<name>"
+            // relative to the working directory. The stat is real - it reproduces outside BuildXL - and
+            // the sandbox reports it, so it is declared rather than argued away. The working directory
+            // itself is probed for the same reason. Both are the pip's own scratch space, which is why
+            // untracking them costs nothing: no other pip can observe what is under it.
+            unsafe: {
+                untrackedPaths: [outDir],
+                untrackedScopes: [d`${outDir}/rpath`],
+            },
             tags: ["compile", "macos", "sandbox"],
         });
 
@@ -226,6 +259,7 @@ namespace EndpointSecuritySandbox {
                 f`UnitTests/bxl-es-selftest.cpp`,
             ].map(Artifact.input)),
             Cmd.option("-arch ", targetArchitecture),
+            Cmd.option("-isysroot ", Artifact.none(MacOsClang.sdkRoot)),
             Cmd.argument("-std=c++17"),
             Cmd.argument("-fblocks"),
             Cmd.argument(`-mmacosx-version-min=${minimumOsVersion}`),
@@ -242,7 +276,17 @@ namespace EndpointSecuritySandbox {
             tool: clangTool,
             workingDirectory: outDir,
             arguments: args,
-            dependencies: headers,
+            dependencies: [...headers, ...includeDirectorySeals],
+            // ld resolves the @rpath install name against its own search list before writing it, and
+            // with no -rpath on the command line the remaining candidate is the literal "rpath/<name>"
+            // relative to the working directory. The stat is real - it reproduces outside BuildXL - and
+            // the sandbox reports it, so it is declared rather than argued away. The working directory
+            // itself is probed for the same reason. Both are the pip's own scratch space, which is why
+            // untracking them costs nothing: no other pip can observe what is under it.
+            unsafe: {
+                untrackedPaths: [outDir],
+                untrackedScopes: [d`${outDir}/rpath`],
+            },
             tags: ["compile", "macos", "sandbox", "test"],
         });
 
