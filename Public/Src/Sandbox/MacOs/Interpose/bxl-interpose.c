@@ -55,6 +55,7 @@
 #include <unistd.h>
 
 #include "InterposeProtocol.h"
+#include "ShadowTool.h"
 
 // ---------------------------------------------------------------------------------------------
 // dyld interposition
@@ -218,10 +219,64 @@ static void SendRecord(
     pthread_mutex_unlock(&g_lock);
 }
 
-/** Turns a possibly relative path into an absolute one. Never allocates. */
-static size_t Absolutize(const char *path, char *buffer, size_t bufferSize)
+/**
+ * Rewrites a shadow path back to the tool it stands in for.
+ *
+ * A shadowed process reads and stats its own image - dyld does, and so does anything that asks where
+ * it is running from - and reporting the copy would put a private cache directory into the build's
+ * observed accesses in place of the tool the pip declared, which is both wrong and a violation. The
+ * answer is cached because a process has one image and asks about it repeatedly.
+ */
+static size_t MapShadow(char *buffer, size_t length, size_t bufferSize)
 {
-    if (path == NULL)
+    static __thread char cachedShadow[BXL_SHADOW_PATH_MAX];
+    static __thread char cachedOrigin[BXL_SHADOW_PATH_MAX];
+
+    if (length == 0 || length >= bufferSize)
+    {
+        return length;
+    }
+
+    buffer[length] = '\0';
+
+    if (cachedShadow[0] != '\0' && strcmp(buffer, cachedShadow) == 0)
+    {
+        const size_t originLength = strlen(cachedOrigin);
+        if (originLength < bufferSize)
+        {
+            memcpy(buffer, cachedOrigin, originLength);
+            return originLength;
+        }
+
+        return length;
+    }
+
+    char origin[BXL_SHADOW_PATH_MAX];
+    if (!BxlShadowOrigin(buffer, origin, sizeof(origin)))
+    {
+        return length;
+    }
+
+    strlcpy(cachedShadow, buffer, sizeof(cachedShadow));
+    strlcpy(cachedOrigin, origin, sizeof(cachedOrigin));
+
+    const size_t originLength = strlen(origin);
+    if (originLength >= bufferSize)
+    {
+        return length;
+    }
+
+    memcpy(buffer, origin, originLength);
+    return originLength;
+}
+
+/** Turns a possibly relative path into an absolute one. Never allocates. */
+static size_t AbsolutizeRaw(const char *path, char *buffer, size_t bufferSize)
+{
+    // The empty string is not a relative path: it names no file and every call taking it fails with
+    // ENOENT without reaching the filesystem. Joining it to the working directory would invent an
+    // access to the directory that the caller never made.
+    if (path == NULL || path[0] == '\0')
     {
         return 0;
     }
@@ -256,22 +311,22 @@ static size_t Absolutize(const char *path, char *buffer, size_t bufferSize)
 }
 
 /** Resolves a path that may be relative to a directory descriptor. */
-static size_t AbsolutizeAt(int fd, const char *path, char *buffer, size_t bufferSize)
+static size_t AbsolutizeAtRaw(int fd, const char *path, char *buffer, size_t bufferSize)
 {
     if (path != NULL && path[0] == '/')
     {
-        return Absolutize(path, buffer, bufferSize);
+        return AbsolutizeRaw(path, buffer, bufferSize);
     }
 
     if (fd == AT_FDCWD || fd < 0)
     {
-        return Absolutize(path, buffer, bufferSize);
+        return AbsolutizeRaw(path, buffer, bufferSize);
     }
 
     char base[PATH_MAX];
     if (fcntl(fd, F_GETPATH, base) == -1)
     {
-        return Absolutize(path, buffer, bufferSize);
+        return AbsolutizeRaw(path, buffer, bufferSize);
     }
 
     const size_t baseLength = strnlen(base, sizeof(base));
@@ -294,12 +349,146 @@ static size_t AbsolutizeAt(int fd, const char *path, char *buffer, size_t buffer
     return baseLength + 1 + pathLength;
 }
 
-static uint16_t OutcomeFlags(int result)
+static size_t Absolutize(const char *path, char *buffer, size_t bufferSize)
 {
-    return (uint16_t)(result == 0 ? kFlagSucceeded : 0);
+    return MapShadow(buffer, AbsolutizeRaw(path, buffer, bufferSize), bufferSize);
 }
 
-static void ReportOne(uint16_t op, const char *path, int result, int capturedErrno)
+static size_t AbsolutizeAt(int fd, const char *path, char *buffer, size_t bufferSize)
+{
+    return MapShadow(buffer, AbsolutizeAtRaw(fd, path, buffer, bufferSize), bufferSize);
+}
+
+/**
+ * What a call that failed proves about the path it names.
+ *
+ * A failure is not the absence of information, and guessing which errnos are informative turned out to
+ * be the wrong shape of question. ENOENT is the only one that proves a path is not there. Every other
+ * failure leaves the question open, so the honest answer is to look:
+ *
+ *   - mkdir answered EEXIST is how every "create if needed" discovers the directory already exists.
+ *     Treating that as no information made .NET's Directory.CreateDirectory look like a write to a
+ *     file that is not there, on every package the NuGet downloader unpacked twice.
+ *   - readlink answered EINVAL means "this is not a symlink", which is how a caller learns it is a
+ *     directory. Treating that as no information made every analyzer directory csc resolved look like
+ *     a read of an undeclared file.
+ *
+ * So the rule is that the errno decides only whether to look, and the lookup decides the answer. It
+ * cannot recurse: dyld does not apply an image's own interpositions to itself, which is the same
+ * reason every wrapper here can call the function it wraps.
+ */
+static uint16_t FailureFlags(int capturedErrno, int fd, const char *path)
+{
+    if (capturedErrno == ENOENT || path == NULL)
+    {
+        return 0;
+    }
+
+    struct stat info;
+    const int found = (fd == AT_FDCWD || path[0] == '/')
+        ? lstat(path, &info)
+        : fstatat(fd, path, &info, AT_SYMLINK_NOFOLLOW);
+
+    if (found != 0)
+    {
+        return 0;
+    }
+
+    return (uint16_t)(kFlagSourceExists | (S_ISDIR(info.st_mode) ? kFlagSourceIsDirectory : 0));
+}
+
+/**
+ * Existence and kind for a call that proves the path is there but not what it is.
+ *
+ * The policy engine allows any access to a directory outright, because there is no way to declare a
+ * dependency on one and tools probe them constantly. So getting the kind wrong on a directory turns an
+ * always-allowed probe into a violation. It matters more than it sounds: realpath() on macOS resolves
+ * each component with getattrlist, so a single realpath of a deep path produced a violation for every
+ * ancestor - /Users, /Users/janpro, and so on up - in protoc and in every .NET tool that canonicalises
+ * a path.
+ *
+ * stat rather than lstat because these calls follow symlinks, so the kind that matters is the kind of
+ * what they landed on.
+ */
+static uint16_t KindFlags(int result, int fd, const char *path)
+{
+    if (result != 0 || path == NULL)
+    {
+        return 0;
+    }
+
+    struct stat info;
+    const int found = (fd == AT_FDCWD || path[0] == '/')
+        ? stat(path, &info)
+        : fstatat(fd, path, &info, 0);
+
+    if (found != 0)
+    {
+        return kFlagSourceExists;
+    }
+
+    return (uint16_t)(kFlagSourceExists | (S_ISDIR(info.st_mode) ? kFlagSourceIsDirectory : 0));
+}
+
+static uint16_t OutcomeFlags(int result, uint16_t onSuccess, int capturedErrno, int fd, const char *path)
+{
+    return (uint16_t)(result == 0
+        ? (kFlagSucceeded | onSuccess)
+        : FailureFlags(capturedErrno, fd, path));
+}
+
+/**
+ * What a call that succeeded proves about the path it names.
+ *
+ * The access checker picks between read, probe and enumerate using the mode the event carries, and a
+ * mode of zero means "does not exist". Reporting every access as nonexistent is not a small
+ * imprecision: a directory that was just created looks like a write to a file that is not there, which
+ * is a violation rather than the allowed directory creation it actually was. So each interposer states
+ * what its own success implies - mkdir made a directory, opendir opened one, chmod found something -
+ * and the stat family, which is handed the answer by the kernel, reports the real st_mode instead of
+ * guessing.
+ */
+#define BXL_EXISTS      ((uint16_t)kFlagSourceExists)
+#define BXL_EXISTS_DIR  ((uint16_t)(kFlagSourceExists | kFlagSourceIsDirectory))
+#define BXL_IS_DIR      ((uint16_t)kFlagSourceIsDirectory)
+#define BXL_BOTH_EXIST  ((uint16_t)(kFlagSourceExists | kFlagDestinationExists))
+
+/** Existence and kind taken from a stat that succeeded, rather than inferred. */
+static uint16_t StatFlags(int result, const struct stat *info)
+{
+    if (result != 0 || info == NULL)
+    {
+        return 0;
+    }
+
+    return (uint16_t)(kFlagSourceExists | (S_ISDIR(info->st_mode) ? kFlagSourceIsDirectory : 0));
+}
+
+/** Existence and kind of an open file, taken from the descriptor the call returned. */
+static uint16_t OpenedFlags(int fd)
+{
+    if (fd < 0)
+    {
+        return 0;
+    }
+
+    struct stat info;
+    // fstat is not interposed, so this cannot recurse, and it needs no path resolution.
+    if (fstat(fd, &info) != 0)
+    {
+        return kFlagSourceExists;
+    }
+
+    return (uint16_t)(kFlagSourceExists | (S_ISDIR(info.st_mode) ? kFlagSourceIsDirectory : 0));
+}
+
+/*
+ * A call whose path argument is NULL or empty names no file. It fails without reaching the
+ * filesystem - EFAULT or ENOENT - so there is nothing to report, and reporting it would push an
+ * empty path into the access checker, which indexes the manifest by absolute path. Callers below
+ * therefore drop the record rather than send a nameless one.
+ */
+static void ReportOne(uint16_t op, const char *path, int result, int capturedErrno, uint16_t onSuccess)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -310,10 +499,16 @@ static void ReportOne(uint16_t op, const char *path, int result, int capturedErr
 
     char resolved[PATH_MAX + 64];
     const size_t length = Absolutize(path, resolved, sizeof(resolved));
+    if (length == 0)
+    {
+        t_reporting = 0;
+        return;
+    }
+
     SendRecord(
         kRecordEvent,
         op,
-        OutcomeFlags(result),
+        OutcomeFlags(result, onSuccess, capturedErrno, AT_FDCWD, path),
         result == 0 ? 0 : capturedErrno,
         resolved,
         length,
@@ -323,7 +518,7 @@ static void ReportOne(uint16_t op, const char *path, int result, int capturedErr
     t_reporting = 0;
 }
 
-static void ReportOneAt(uint16_t op, int fd, const char *path, int result, int capturedErrno)
+static void ReportOneAt(uint16_t op, int fd, const char *path, int result, int capturedErrno, uint16_t onSuccess)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -334,10 +529,16 @@ static void ReportOneAt(uint16_t op, int fd, const char *path, int result, int c
 
     char resolved[PATH_MAX + 64];
     const size_t length = AbsolutizeAt(fd, path, resolved, sizeof(resolved));
+    if (length == 0)
+    {
+        t_reporting = 0;
+        return;
+    }
+
     SendRecord(
         kRecordEvent,
         op,
-        OutcomeFlags(result),
+        OutcomeFlags(result, onSuccess, capturedErrno, fd, path),
         result == 0 ? 0 : capturedErrno,
         resolved,
         length,
@@ -347,7 +548,7 @@ static void ReportOneAt(uint16_t op, int fd, const char *path, int result, int c
     t_reporting = 0;
 }
 
-static void ReportTwo(uint16_t op, const char *source, const char *destination, int result, int capturedErrno)
+static void ReportTwo(uint16_t op, const char *source, const char *destination, int result, int capturedErrno, uint16_t onSuccess)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -360,10 +561,16 @@ static void ReportTwo(uint16_t op, const char *source, const char *destination, 
     char resolvedDestination[PATH_MAX + 64];
     const size_t sourceLength = Absolutize(source, resolvedSource, sizeof(resolvedSource));
     const size_t destinationLength = Absolutize(destination, resolvedDestination, sizeof(resolvedDestination));
+    if (sourceLength == 0 || destinationLength == 0)
+    {
+        t_reporting = 0;
+        return;
+    }
+
     SendRecord(
         kRecordEvent,
         op,
-        OutcomeFlags(result),
+        OutcomeFlags(result, onSuccess, capturedErrno, AT_FDCWD, destination),
         result == 0 ? 0 : capturedErrno,
         resolvedSource,
         sourceLength,
@@ -429,7 +636,17 @@ static void Connect(void)
 
     char executable[PATH_MAX];
     memset(executable, 0, sizeof(executable));
-    const int executableLength = proc_pidpath((int)g_pid, executable, (uint32_t)sizeof(executable));
+    int executableLength = proc_pidpath((int)g_pid, executable, (uint32_t)sizeof(executable));
+
+    // A shadowed process is running a copy, and the build declared the original. Reporting the copy
+    // would put a private cache directory into the observed accesses in place of the tool.
+    char origin[PATH_MAX];
+    if (executableLength > 0 && BxlShadowOrigin(executable, origin, sizeof(origin)))
+    {
+        strlcpy(executable, origin, sizeof(executable));
+        executableLength = (int)strlen(executable);
+    }
+
     SendRecord(
         kRecordHello,
         kOpUnknown,
@@ -507,7 +724,25 @@ static int IsInjectable(const char *path)
     return 1;
 }
 
-static void ReportExec(uint16_t op, const char *path)
+/**
+ * The image to actually run in place of `path`.
+ *
+ * System Integrity Protection makes dyld drop the observation library from a protected binary and
+ * erase DYLD_INSERT_LIBRARIES from its environment, so the process and everything below it goes
+ * unobserved. On macOS that reaches almost every build: a shell script is a protected /bin/sh running
+ * protected /bin/cp, /usr/bin/sed and /usr/bin/rsync. An ad-hoc signed copy is the same machine code
+ * without the protection, so it can be observed. See ShadowTool.h for why a plain copy will not run.
+ *
+ * `path` is still what gets reported - it is what the pip declared and what its fingerprint is built
+ * from - and argv is untouched, so the tool sees its own path in argv[0]. Falls back to the original
+ * whenever a copy cannot be made, which is the same outcome as not trying.
+ */
+static const char *Injectable(const char *path, char *scratch, size_t size)
+{
+    return BxlShadowResolve(path, scratch, size) ? scratch : path;
+}
+
+static void ReportExec(uint16_t op, const char *path, const char *image)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -518,11 +753,20 @@ static void ReportExec(uint16_t op, const char *path)
 
     char resolved[PATH_MAX + 64];
     const size_t length = Absolutize(path, resolved, sizeof(resolved));
+    if (length == 0)
+    {
+        t_reporting = 0;
+        return;
+    }
 
     // Reported before the exec, because a successful execve never returns to report anything.
-    SendRecord(kRecordEvent, op, kFlagSucceeded, 0, resolved, length, NULL, 0);
+    // An image about to be executed is a regular file that exists; if it did not, the exec would
+    // fail and the caller would carry on, having still made the access we are reporting.
+    SendRecord(kRecordEvent, op, (uint16_t)(kFlagSucceeded | kFlagSourceExists), 0, resolved, length, NULL, 0);
 
-    if (!IsInjectable(path))
+    // The image, not the path: a shadowed tool is observable even though the tool it stands in for is
+    // not, and claiming a loss that did not happen would make the pip uncacheable for no reason.
+    if (!IsInjectable(image))
     {
         SendRecord(kRecordUnobservableChild, op, 0, 0, resolved, length, NULL, 0);
     }
@@ -537,7 +781,7 @@ static void ReportTwoAt(
     int destinationFd,
     const char *destination,
     int result,
-    int capturedErrno)
+    int capturedErrno, uint16_t onSuccess)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -551,10 +795,16 @@ static void ReportTwoAt(
     const size_t sourceLength = AbsolutizeAt(sourceFd, source, resolvedSource, sizeof(resolvedSource));
     const size_t destinationLength =
         AbsolutizeAt(destinationFd, destination, resolvedDestination, sizeof(resolvedDestination));
+    if (sourceLength == 0 || destinationLength == 0)
+    {
+        t_reporting = 0;
+        return;
+    }
+
     SendRecord(
         kRecordEvent,
         op,
-        OutcomeFlags(result),
+        OutcomeFlags(result, onSuccess, capturedErrno, destinationFd, destination),
         result == 0 ? 0 : capturedErrno,
         resolvedSource,
         sourceLength,
@@ -584,6 +834,12 @@ static void ReportUnobservable(const char *path, const char *reason)
 
     char resolved[PATH_MAX + 64];
     const size_t length = Absolutize(path, resolved, sizeof(resolved));
+    if (length == 0)
+    {
+        t_reporting = 0;
+        return;
+    }
+
     SendRecord(kRecordUnobservableChild, kOpUnknown, 0, 0, resolved, length, NULL, 0);
 
     t_reporting = 0;
@@ -620,7 +876,7 @@ static int bxl_open(const char *path, int flags, ...)
     }
 
     const int result = open(path, flags, mode);
-    ReportOne(OpenOp(flags), path, result >= 0 ? 0 : -1, errno);
+    ReportOne(OpenOp(flags), path, result >= 0 ? 0 : -1, errno, OpenedFlags(result));
     return result;
 }
 
@@ -636,7 +892,7 @@ static int bxl_open_nocancel(const char *path, int flags, ...)
     }
 
     const int result = bxl_real_open_nocancel(path, flags, mode);
-    ReportOne(OpenOp(flags), path, result >= 0 ? 0 : -1, errno);
+    ReportOne(OpenOp(flags), path, result >= 0 ? 0 : -1, errno, OpenedFlags(result));
     return result;
 }
 
@@ -652,196 +908,263 @@ static int bxl_openat(int fd, const char *path, int flags, ...)
     }
 
     const int result = openat(fd, path, flags, mode);
-    ReportOneAt(OpenOp(flags), fd, path, result >= 0 ? 0 : -1, errno);
+    ReportOneAt(OpenOp(flags), fd, path, result >= 0 ? 0 : -1, errno, OpenedFlags(result));
     return result;
 }
 
 static int bxl_creat(const char *path, mode_t mode)
 {
     const int result = creat(path, mode);
-    ReportOne(kOpCreate, path, result >= 0 ? 0 : -1, errno);
+    ReportOne(kOpCreate, path, result >= 0 ? 0 : -1, errno, OpenedFlags(result));
     return result;
 }
 
 static int bxl_stat(const char *path, struct stat *out)
 {
     const int result = stat(path, out);
-    ReportOne(kOpStat, path, result, errno);
+    ReportOne(kOpStat, path, result, errno, StatFlags(result, out));
     return result;
 }
 
 static int bxl_lstat(const char *path, struct stat *out)
 {
     const int result = lstat(path, out);
-    ReportOne(kOpStat, path, result, errno);
+    ReportOne(kOpStat, path, result, errno, StatFlags(result, out));
     return result;
 }
 
 static int bxl_fstatat(int fd, const char *path, struct stat *out, int flag)
 {
     const int result = fstatat(fd, path, out, flag);
-    ReportOneAt(kOpStat, fd, path, result, errno);
+    ReportOneAt(kOpStat, fd, path, result, errno, StatFlags(result, out));
     return result;
 }
 
 static int bxl_access(const char *path, int mode)
 {
     const int result = access(path, mode);
-    ReportOne(kOpAccess, path, result, errno);
+    ReportOne(kOpAccess, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_faccessat(int fd, const char *path, int mode, int flag)
 {
     const int result = faccessat(fd, path, mode, flag);
-    ReportOneAt(kOpAccess, fd, path, result, errno);
+    ReportOneAt(kOpAccess, fd, path, result, errno, KindFlags(result, fd, path));
     return result;
 }
 
 static DIR *bxl_opendir(const char *path)
 {
     DIR *const result = opendir(path);
-    ReportOne(kOpReadDir, path, result != NULL ? 0 : -1, errno);
+    ReportOne(kOpReadDir, path, result != NULL ? 0 : -1, errno, BXL_EXISTS_DIR);
     return result;
 }
 
 static ssize_t bxl_readlink(const char *path, char *buffer, size_t size)
 {
     const ssize_t result = readlink(path, buffer, size);
-    ReportOne(kOpReadLink, path, result >= 0 ? 0 : -1, errno);
+    ReportOne(kOpReadLink, path, result >= 0 ? 0 : -1, errno, BXL_EXISTS);
     return result;
 }
 
+/**
+ * Reports a readlink for every component of a path that really is a symlink.
+ *
+ * realpath() reads only the links it actually encounters, so reporting a readlink on the whole input,
+ * or on components that are not links, invents dependencies the caller never took. Mirrors
+ * report_intermediate_symlinks() in the Linux sandbox.
+ * CODESYNC: Public/Src/Sandbox/Linux/detours.cpp (realpath)
+ */
+static void ReportIntermediateSymlinks(const char *path)
+{
+    if (path == NULL)
+    {
+        return;
+    }
+
+    const size_t total = strnlen(path, PATH_MAX);
+    if (total == 0 || total >= PATH_MAX)
+    {
+        return;
+    }
+
+    char prefix[PATH_MAX];
+
+    for (size_t i = 1; i <= total; i++)
+    {
+        if (i != total && path[i] != '/')
+        {
+            continue;
+        }
+
+        memcpy(prefix, path, i);
+        prefix[i] = '\0';
+
+        struct stat info;
+        if (lstat(prefix, &info) == 0 && S_ISLNK(info.st_mode))
+        {
+            ReportOne(kOpReadLink, prefix, 0, 0, BXL_EXISTS);
+        }
+    }
+}
+
+/**
+ * realpath() canonicalises a path; it does not read a link the caller already knows about.
+ *
+ * Reporting it as a readlink of its input was wrong in a way that only a real build could show: the
+ * call succeeds on a directory, so it looked like a successful read of an existing non-directory, and
+ * every analyzer directory that csc canonicalised became a missing source dependency. What the caller
+ * actually learns is whether the path exists, so the input is a probe - and the links that were really
+ * traversed are reported individually, exactly as the Linux sandbox does.
+ */
 static char *bxl_realpath(const char *path, char *resolved)
 {
     char *const result = realpath(path, resolved);
-    ReportOne(kOpReadLink, path, result != NULL ? 0 : -1, errno);
+    const int capturedErrno = errno;
+
+    ReportOne(
+        kOpStat,
+        path,
+        result != NULL ? 0 : -1,
+        capturedErrno,
+        result != NULL ? KindFlags(0, AT_FDCWD, path) : 0);
+
+    // Only worth walking when something was actually resolved away.
+    if (path != NULL && result != NULL && strcmp(path, result) != 0)
+    {
+        ReportIntermediateSymlinks(path);
+        ReportOne(kOpStat, result, 0, 0, KindFlags(0, AT_FDCWD, result));
+    }
+
     return result;
 }
 
 static int bxl_mkdir(const char *path, mode_t mode)
 {
     const int result = mkdir(path, mode);
-    ReportOne(kOpMkDir, path, result, errno);
+    ReportOne(kOpMkDir, path, result, errno, BXL_EXISTS_DIR);
     return result;
 }
 
 static int bxl_mkdirat(int fd, const char *path, mode_t mode)
 {
     const int result = mkdirat(fd, path, mode);
-    ReportOneAt(kOpMkDir, fd, path, result, errno);
+    ReportOneAt(kOpMkDir, fd, path, result, errno, BXL_EXISTS_DIR);
     return result;
 }
 
 static int bxl_rmdir(const char *path)
 {
     const int result = rmdir(path);
-    ReportOne(kOpRmDir, path, result, errno);
+    ReportOne(kOpRmDir, path, result, errno, BXL_IS_DIR);
     return result;
 }
 
 static int bxl_unlink(const char *path)
 {
     const int result = unlink(path);
-    ReportOne(kOpUnlink, path, result, errno);
+    ReportOne(kOpUnlink, path, result, errno, 0);
     return result;
 }
 
 static int bxl_unlinkat(int fd, const char *path, int flag)
 {
     const int result = unlinkat(fd, path, flag);
-    ReportOneAt(kOpUnlink, fd, path, result, errno);
+    ReportOneAt(kOpUnlink, fd, path, result, errno, 0);
     return result;
 }
 
 static int bxl_remove(const char *path)
 {
     const int result = remove(path);
-    ReportOne(kOpUnlink, path, result, errno);
+    ReportOne(kOpUnlink, path, result, errno, 0);
     return result;
 }
 
 static int bxl_rename(const char *from, const char *to)
 {
     const int result = rename(from, to);
-    ReportTwo(kOpRename, from, to, result, errno);
+    ReportTwo(kOpRename, from, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_renamex_np(const char *from, const char *to, unsigned int flags)
 {
     const int result = renamex_np(from, to, flags);
-    ReportTwo(kOpRename, from, to, result, errno);
+    ReportTwo(kOpRename, from, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_link(const char *from, const char *to)
 {
     const int result = link(from, to);
-    ReportTwo(kOpLink, from, to, result, errno);
+    ReportTwo(kOpLink, from, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_symlink(const char *target, const char *path)
 {
     const int result = symlink(target, path);
-    ReportTwo(kOpSymlink, target, path, result, errno);
+    ReportTwo(kOpSymlink, target, path, result, errno, kFlagDestinationExists);
     return result;
 }
 
 static int bxl_clonefile(const char *from, const char *to, int flags)
 {
     const int result = clonefile(from, to, flags);
-    ReportTwo(kOpCloneFile, from, to, result, errno);
+    ReportTwo(kOpCloneFile, from, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_chmod(const char *path, mode_t mode)
 {
     const int result = chmod(path, mode);
-    ReportOne(kOpChMod, path, result, errno);
+    ReportOne(kOpChMod, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_chown(const char *path, uid_t owner, gid_t group)
 {
     const int result = chown(path, owner, group);
-    ReportOne(kOpChOwn, path, result, errno);
+    ReportOne(kOpChOwn, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_truncate(const char *path, off_t length)
 {
     const int result = truncate(path, length);
-    ReportOne(kOpTruncate, path, result, errno);
+    ReportOne(kOpTruncate, path, result, errno, BXL_EXISTS);
     return result;
 }
 
 static int bxl_utimensat(int fd, const char *path, const struct timespec times[2], int flag)
 {
     const int result = utimensat(fd, path, times, flag);
-    ReportOneAt(kOpUTimes, fd, path, result, errno);
+    ReportOneAt(kOpUTimes, fd, path, result, errno, KindFlags(result, fd, path));
     return result;
 }
 
 static int bxl_chflags(const char *path, unsigned int flags)
 {
     const int result = chflags(path, flags);
-    ReportOne(kOpSetFlags, path, result, errno);
+    ReportOne(kOpSetFlags, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_chdir(const char *path)
 {
     const int result = chdir(path);
-    ReportOne(kOpChDir, path, result, errno);
+    ReportOne(kOpChDir, path, result, errno, BXL_EXISTS_DIR);
     return result;
 }
 
 static int bxl_execve(const char *path, char *const argv[], char *const envp[])
 {
-    ReportExec(kOpExec, path);
-    return execve(path, argv, envp);
+    char shadow[BXL_SHADOW_PATH_MAX];
+    const char *const image = Injectable(path, shadow, sizeof(shadow));
+    ReportExec(kOpExec, path, image);
+    return execve(image, argv, envp);
 }
 
 static int bxl_posix_spawn(
@@ -852,8 +1175,10 @@ static int bxl_posix_spawn(
     char *const argv[],
     char *const envp[])
 {
-    ReportExec(kOpSpawn, path);
-    return posix_spawn(pid, path, fileActions, attributes, argv, envp);
+    char shadow[BXL_SHADOW_PATH_MAX];
+    const char *const image = Injectable(path, shadow, sizeof(shadow));
+    ReportExec(kOpSpawn, path, image);
+    return posix_spawn(pid, image, fileActions, attributes, argv, envp);
 }
 
 static int bxl_posix_spawnp(
@@ -864,8 +1189,12 @@ static int bxl_posix_spawnp(
     char *const argv[],
     char *const envp[])
 {
-    ReportExec(kOpSpawn, file);
-    return posix_spawnp(pid, file, fileActions, attributes, argv, envp);
+    // A bare name is left alone: posix_spawnp resolves it against PATH, and guessing which entry it
+    // will pick would be a different tool, not a copy of the same one.
+    char shadow[BXL_SHADOW_PATH_MAX];
+    const char *const image = Injectable(file, shadow, sizeof(shadow));
+    ReportExec(kOpSpawn, file, image);
+    return posix_spawnp(pid, image, fileActions, attributes, argv, envp);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -885,147 +1214,147 @@ static int bxl_posix_spawnp(
 static int bxl_getattrlist(const char *path, void *list, void *buffer, size_t size, unsigned int options)
 {
     const int result = getattrlist(path, list, buffer, size, options);
-    ReportOne(kOpStat, path, result, errno);
+    ReportOne(kOpStat, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_setattrlist(const char *path, void *list, void *buffer, size_t size, unsigned int options)
 {
     const int result = setattrlist(path, list, buffer, size, options);
-    ReportOne(kOpSetFlags, path, result, errno);
+    ReportOne(kOpSetFlags, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_getattrlistat(int fd, const char *path, void *list, void *buffer, size_t size, unsigned long options)
 {
     const int result = getattrlistat(fd, path, list, buffer, size, options);
-    ReportOneAt(kOpStat, fd, path, result, errno);
+    ReportOneAt(kOpStat, fd, path, result, errno, KindFlags(result, fd, path));
     return result;
 }
 
 static int bxl_setattrlistat(int fd, const char *path, void *list, void *buffer, size_t size, uint32_t options)
 {
     const int result = setattrlistat(fd, path, list, buffer, size, options);
-    ReportOneAt(kOpSetFlags, fd, path, result, errno);
+    ReportOneAt(kOpSetFlags, fd, path, result, errno, KindFlags(result, fd, path));
     return result;
 }
 
 static int bxl_renameat(int fromFd, const char *from, int toFd, const char *to)
 {
     const int result = renameat(fromFd, from, toFd, to);
-    ReportTwoAt(kOpRename, fromFd, from, toFd, to, result, errno);
+    ReportTwoAt(kOpRename, fromFd, from, toFd, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_renameatx_np(int fromFd, const char *from, int toFd, const char *to, unsigned int flags)
 {
     const int result = renameatx_np(fromFd, from, toFd, to, flags);
-    ReportTwoAt(kOpRename, fromFd, from, toFd, to, result, errno);
+    ReportTwoAt(kOpRename, fromFd, from, toFd, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_linkat(int fromFd, const char *from, int toFd, const char *to, int flag)
 {
     const int result = linkat(fromFd, from, toFd, to, flag);
-    ReportTwoAt(kOpLink, fromFd, from, toFd, to, result, errno);
+    ReportTwoAt(kOpLink, fromFd, from, toFd, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_symlinkat(const char *target, int fd, const char *path)
 {
     const int result = symlinkat(target, fd, path);
-    ReportOneAt(kOpSymlink, fd, path, result, errno);
+    ReportOneAt(kOpSymlink, fd, path, result, errno, BXL_EXISTS);
     return result;
 }
 
 static ssize_t bxl_readlinkat(int fd, const char *path, char *buffer, size_t size)
 {
     const ssize_t result = readlinkat(fd, path, buffer, size);
-    ReportOneAt(kOpReadLink, fd, path, result < 0 ? -1 : 0, errno);
+    ReportOneAt(kOpReadLink, fd, path, result < 0 ? -1 : 0, errno, BXL_EXISTS);
     return result;
 }
 
 static int bxl_fchmodat(int fd, const char *path, mode_t mode, int flag)
 {
     const int result = fchmodat(fd, path, mode, flag);
-    ReportOneAt(kOpChMod, fd, path, result, errno);
+    ReportOneAt(kOpChMod, fd, path, result, errno, KindFlags(result, fd, path));
     return result;
 }
 
 static int bxl_fchownat(int fd, const char *path, uid_t owner, gid_t group, int flag)
 {
     const int result = fchownat(fd, path, owner, group, flag);
-    ReportOneAt(kOpChOwn, fd, path, result, errno);
+    ReportOneAt(kOpChOwn, fd, path, result, errno, KindFlags(result, fd, path));
     return result;
 }
 
 static int bxl_lchown(const char *path, uid_t owner, gid_t group)
 {
     const int result = lchown(path, owner, group);
-    ReportOne(kOpChOwn, path, result, errno);
+    ReportOne(kOpChOwn, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_lchflags(const char *path, unsigned int flags)
 {
     const int result = lchflags(path, flags);
-    ReportOne(kOpSetFlags, path, result, errno);
+    ReportOne(kOpSetFlags, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_utimes(const char *path, const struct timeval times[2])
 {
     const int result = utimes(path, times);
-    ReportOne(kOpUTimes, path, result, errno);
+    ReportOne(kOpUTimes, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_lutimes(const char *path, const struct timeval times[2])
 {
     const int result = lutimes(path, times);
-    ReportOne(kOpUTimes, path, result, errno);
+    ReportOne(kOpUTimes, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static int bxl_copyfile(const char *from, const char *to, copyfile_state_t state, copyfile_flags_t flags)
 {
     const int result = copyfile(from, to, state, flags);
-    ReportTwo(kOpCopyFile, from, to, result, errno);
+    ReportTwo(kOpCopyFile, from, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_clonefileat(int fromFd, const char *from, int toFd, const char *to, unsigned int flags)
 {
     const int result = clonefileat(fromFd, from, toFd, to, flags);
-    ReportTwoAt(kOpCloneFile, fromFd, from, toFd, to, result, errno);
+    ReportTwoAt(kOpCloneFile, fromFd, from, toFd, to, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_exchangedata(const char *first, const char *second, unsigned int options)
 {
     const int result = exchangedata(first, second, options);
-    ReportTwo(kOpRename, first, second, result, errno);
+    ReportTwo(kOpRename, first, second, result, errno, BXL_BOTH_EXIST);
     return result;
 }
 
 static int bxl_mkfifo(const char *path, mode_t mode)
 {
     const int result = mkfifo(path, mode);
-    ReportOne(kOpCreate, path, result, errno);
+    ReportOne(kOpCreate, path, result, errno, BXL_EXISTS);
     return result;
 }
 
 static int bxl_mkfifoat(int fd, const char *path, mode_t mode)
 {
     const int result = mkfifoat(fd, path, mode);
-    ReportOneAt(kOpCreate, fd, path, result, errno);
+    ReportOneAt(kOpCreate, fd, path, result, errno, BXL_EXISTS);
     return result;
 }
 
 static int bxl_mknod(const char *path, mode_t mode, dev_t dev)
 {
     const int result = mknod(path, mode, dev);
-    ReportOne(kOpCreate, path, result, errno);
+    ReportOne(kOpCreate, path, result, errno, BXL_EXISTS);
     return result;
 }
 
@@ -1037,28 +1366,28 @@ static int bxl_mknod(const char *path, mode_t mode, dev_t dev)
 static int bxl_getattrlistbulk(int fd, void *list, void *buffer, size_t size, uint64_t options)
 {
     const int result = getattrlistbulk(fd, list, buffer, size, options);
-    ReportOneAt(kOpReadDir, fd, "", result < 0 ? -1 : 0, errno);
+    ReportOneAt(kOpReadDir, fd, "", result < 0 ? -1 : 0, errno, BXL_EXISTS_DIR);
     return result;
 }
 
 static int bxl_mknodat(int fd, const char *path, mode_t mode, dev_t dev)
 {
     const int result = mknodat(fd, path, mode, dev);
-    ReportOneAt(kOpCreate, fd, path, result, errno);
+    ReportOneAt(kOpCreate, fd, path, result, errno, BXL_EXISTS);
     return result;
 }
 
 static int bxl_statfs(const char *path, struct statfs *out)
 {
     const int result = statfs(path, out);
-    ReportOne(kOpStat, path, result, errno);
+    ReportOne(kOpStat, path, result, errno, KindFlags(result, AT_FDCWD, path));
     return result;
 }
 
 static long bxl_pathconf(const char *path, int name)
 {
     const long result = pathconf(path, name);
-    ReportOne(kOpStat, path, result < 0 ? -1 : 0, errno);
+    ReportOne(kOpStat, path, result < 0 ? -1 : 0, errno, KindFlags(result < 0 ? -1 : 0, AT_FDCWD, path));
     return result;
 }
 

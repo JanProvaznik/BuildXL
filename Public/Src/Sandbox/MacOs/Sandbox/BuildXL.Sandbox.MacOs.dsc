@@ -209,6 +209,11 @@ namespace EndpointSecuritySandbox {
             Cmd.option("-o ", Artifact.output(outFile)),
             Cmd.argument(Artifact.input(f`../Interpose/bxl-interpose.c`)),
             Cmd.option("-arch ", targetArchitecture),
+            // Also built for arm64e, which is not a variant of the same thing but a requirement.
+            // Apple's own command line tools -- /bin/sh, /bin/cp, /usr/bin/sed -- ship only x86_64 and
+            // arm64e slices, so the ad-hoc signed copies the sandbox runs in their place are arm64e
+            // processes, and dyld will not load an arm64-only library into one.
+            ...(targetArchitecture === "arm64" ? [Cmd.option("-arch ", "arm64e")] : []),
             Cmd.option("-isysroot ", Artifact.none(MacOsClang.sdkRoot)),
             Cmd.argument("-std=c11"),
             Cmd.argument(`-mmacosx-version-min=${minimumOsVersion}`),
@@ -228,7 +233,11 @@ namespace EndpointSecuritySandbox {
             tool: clangCTool,
             workingDirectory: outDir,
             arguments: args,
-            dependencies: [f`../Interpose/InterposeProtocol.h`, ...includeDirectorySeals],
+            dependencies: [
+                f`../Interpose/InterposeProtocol.h`,
+                f`../Interpose/ShadowTool.h`,
+                ...includeDirectorySeals,
+            ],
             // ld resolves the @rpath install name against its own search list before writing it, and
             // with no -rpath on the command line the remaining candidate is the literal "rpath/<name>"
             // relative to the working directory. The stat is real - it reproduces outside BuildXL - and

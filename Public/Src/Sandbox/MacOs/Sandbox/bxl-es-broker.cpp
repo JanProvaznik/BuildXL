@@ -521,15 +521,34 @@ int main(int argc, char **argv)
     // Said before the spawn rather than inferred from the taint afterwards. A SIP protected tool
     // produces a correct but unhelpful LifecycleNotClosed: the pip is not cached, which is right, but
     // nothing tells the operator that the cause is the executable they chose and that it is fixable.
+    const char *toolToExecute = argv[1];
+    std::string shadowTool;
+
     if (backendChoice == "interpose")
     {
         std::string reason;
         if (!InterposeIngress::IsInjectable(argv[1], reason))
         {
-            sink.WriteDebugMessage(
-                buildxl::linux::DebugEventSeverity::kWarning,
-                static_cast<int32_t>(getpid()),
-                "macOS sandbox cannot observe this pip: " + reason);
+            std::string shadowError;
+            if (InterposeIngress::MakeInjectable(argv[1], shadowTool, shadowError))
+            {
+                // argv is untouched, so the tool still sees its own path in argv[0].
+                toolToExecute = shadowTool.c_str();
+                sink.WriteDebugMessage(
+                    buildxl::linux::DebugEventSeverity::kInfo,
+                    static_cast<int32_t>(getpid()),
+                    "macOS sandbox is running an ad-hoc signed copy of '" + std::string(argv[1])
+                        + "' so that it can be observed: System Integrity Protection would otherwise "
+                          "strip the observation library from it and from everything it starts");
+            }
+            else
+            {
+                sink.WriteDebugMessage(
+                    buildxl::linux::DebugEventSeverity::kWarning,
+                    static_cast<int32_t>(getpid()),
+                    "macOS sandbox cannot observe this pip: " + reason + ". A copy that could be "
+                    "observed was not usable either: " + shadowError);
+            }
         }
     }
 
@@ -539,7 +558,7 @@ int main(int argc, char **argv)
     posix_spawnattr_setpgroup(&attributes, 0);
 
     pid_t childPid = -1;
-    const int spawnResult = posix_spawnp(&childPid, argv[1], nullptr, &attributes, &argv[1], environ);
+    const int spawnResult = posix_spawnp(&childPid, toolToExecute, nullptr, &attributes, &argv[1], environ);
     posix_spawnattr_destroy(&attributes);
 
     if (spawnResult != 0)
