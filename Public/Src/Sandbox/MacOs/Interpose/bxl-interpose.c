@@ -1480,6 +1480,35 @@ static int bxl_getattrlistbulk(int fd, void *list, void *buffer, size_t size, ui
     return result;
 }
 
+/**
+ * The real bulk enumeration entry point behind readdir.
+ *
+ * The documented legacy call, getdirentries, cannot be reached at all on this platform: with 64-bit
+ * inodes in effect -- which is unconditional on arm64 -- the SDK redirects it to a deliberately
+ * undefined symbol, so a program that calls it fails to link. __getdirentries64 is what libsystem
+ * actually uses, and it is exported, so a program can import it directly.
+ *
+ * libsystem's readdir reaches it by a cross-image call, which interposition does see, so a plain
+ * readdir loop reports twice: once here and once from bxl_readdir. That is deliberate. Deduplicating
+ * would mean memoising a descriptor number across two layers, and a descriptor number is only unique
+ * until it is closed and reused, so the memo could suppress a real enumeration of a different
+ * directory. A path set is a set, so the cost of the duplicate is a few thousand extra records in a
+ * full build and nothing else, and a missed enumeration is a wrong cache hit. getattrlistbulk has
+ * the same shape for the same reason.
+ *
+ * These were previously exempt from coverage on the grounds that a directory descriptor can only be
+ * obtained from the interposed open or opendir. That reasoning depended on opendir reporting an
+ * enumeration, and it deliberately no longer does.
+ */
+extern ssize_t __getdirentries64(int fd, void *buffer, size_t bufferSize, off_t *position);
+
+static ssize_t bxl_getdirentries64(int fd, void *buffer, size_t bufferSize, off_t *position)
+{
+    const ssize_t result = __getdirentries64(fd, buffer, bufferSize, position);
+    ReportOneAt(kOpReadDir, fd, "", result < 0 ? -1 : 0, errno, BXL_EXISTS_DIR);
+    return result;
+}
+
 static int bxl_mknodat(int fd, const char *path, mode_t mode, dev_t dev)
 {
     const int result = mknodat(fd, path, mode, dev);
@@ -1575,4 +1604,5 @@ BXL_INTERPOSE(bxl_statfs, statfs)
 BXL_INTERPOSE(bxl_pathconf, pathconf)
 BXL_INTERPOSE(bxl_chroot, chroot)
 BXL_INTERPOSE(bxl_getattrlistbulk, getattrlistbulk)
+BXL_INTERPOSE(bxl_getdirentries64, __getdirentries64)
 BXL_INTERPOSE(bxl_mknodat, mknodat)

@@ -63,9 +63,11 @@ EXEMPT = {
 
     # Reached only through an entry point that is interposed. Measured, not assumed:
     # InterposeCoverageTests exercises each of these and asserts the access is reported.
-    "getdirentries": "directory contents are only reachable through a descriptor obtained from the "
-                     "interposed open/opendir, and BuildXL models enumeration per directory",
-    "getdirentriesattr": "same descriptor argument as getdirentries",
+    "getdirentries": "unreachable on this platform: with 64-bit inodes in effect, which is "
+                     "unconditional on arm64, the SDK redirects it to a deliberately undefined "
+                     "symbol, so a program that calls it does not link. The entry point that "
+                     "libsystem actually uses, __getdirentries64, is interposed",
+    "getdirentriesattr": "same 64-bit-inode redirect as getdirentries, and deprecated since 10.10",
     "fclonefileat": "takes a source descriptor, which came from an interposed open",
 
     # Cannot occur inside a pip without the pip already being uncacheable for another reason.

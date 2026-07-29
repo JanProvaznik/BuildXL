@@ -23,18 +23,18 @@ namespace {
  * the managed reader is also appended there in its wire form. The managed side only ever surfaces
  * the *conclusions* it drew from a report, so when a build disagrees with a standalone repro this is
  * the only way to see what was actually sent. Off unless the variable is set.
+ *
+ * Deliberately env-var only. An earlier revision also honoured a well-known marker file, because the
+ * engine does not forward its own environment to the broker and a marker was the only way to arm
+ * this for a whole build. That is a backdoor: any process on the machine could turn it on, and the
+ * write it then performs is undeclared, so it fails the very pip it is meant to diagnose. To capture
+ * a whole build, put the variable in the pip's declared environment, or drive the broker directly.
  */
 void TeeReport(const char *buffer, unsigned int length)
 {
     static int s_teeFd = [] {
-        // The engine does not forward its own environment to the broker, so a marker file is the
-        // only way to turn this on for a real build. Either form works.
         const char *path = getenv("__BUILDXL_MACOS_REPORT_TEE");
-        if (path != nullptr)
-        {
-            return open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        }
-        return open("/tmp/.bxl-macos-report-tee", O_WRONLY | O_APPEND);
+        return path != nullptr ? open(path, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
     }();
 
     if (s_teeFd < 0 || length <= sizeof(uint32_t))
