@@ -10,6 +10,18 @@ TaintReason SequenceTracker::Observe(const NormalizedEvent &event)
 {
     TaintReason taint = TaintReason::kNone;
 
+    if (!event.sequenceIsKernelAssigned)
+    {
+        // Nothing here applies. The message version is an Endpoint Security concept, and the sequence
+        // is per process rather than per client, so consecutive events from different processes are
+        // expected to "go backwards". Asserting on either would produce a taint on every single build
+        // that says nothing about whether anything was lost. Loss for this backend is detected where
+        // the per-process framing is visible and surfaced through BackendReportedLosses().
+        m_userSpaceSequencedCount++;
+        m_observedCount++;
+        return taint;
+    }
+
     if (event.messageVersion < kMinimumSupportedMessageVersion)
     {
         // Without global_seq_num there is no way to know whether the kernel dropped anything, so the

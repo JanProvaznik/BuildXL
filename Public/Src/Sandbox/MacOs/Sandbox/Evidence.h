@@ -62,6 +62,15 @@ struct EvidenceSummary
     bool fenceClosed = false;
     bool supervisionQuiesced = false;
     bool lifecycleClosed = false;
+
+    /**
+     * Losses the observation backend detected in its own transport, which the sequence tracker cannot
+     * see. Zero for Endpoint Security, where the kernel sequence is the only loss signal.
+     */
+    uint64_t backendReportedLosses = 0;
+
+    /** Events delivered before the engine was published. Expected to be zero; recorded so it is checkable. */
+    uint64_t eventsDroppedBeforeEngineStart = 0;
     TaintReason taint = TaintReason::kNone;
     int32_t childExitCode = 0;
 };

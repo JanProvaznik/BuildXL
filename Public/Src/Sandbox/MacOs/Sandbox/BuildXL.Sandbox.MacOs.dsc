@@ -11,6 +11,16 @@ namespace EndpointSecuritySandbox {
 
     const isMacOsHost = Context.getCurrentHost().os === "macOS";
 
+    const clangCTool : Transformer.ToolDefinition = {
+        exe: f`/usr/bin/clang`,
+        prepareTempDirectory: true,
+        dependsOnCurrentHostOSDirectories: true,
+        untrackedDirectoryScopes: [
+            d`/Library/Developer`,
+            d`/Applications/Xcode.app`
+        ]
+    };
+
     const clangTool : Transformer.ToolDefinition = {
         exe: f`/usr/bin/clang++`,
         prepareTempDirectory: true,
@@ -58,6 +68,7 @@ namespace EndpointSecuritySandbox {
         f`ReplaySource.cpp`,
         f`Evidence.cpp`,
         f`EsIngress.cpp`,
+        f`InterposeIngress.cpp`,
     ];
 
     const brokerSources : File[] = [
@@ -67,6 +78,7 @@ namespace EndpointSecuritySandbox {
 
     const headers : File[] = [
         ...globR(sandboxRoot, "*.h"),
+        ...globR(d`../Interpose`, "*.h"),
         ...globR(d`${sandboxRoot}/UnitTests`, "*.h"),
         ...globR(d`${sandboxSourceRoot}/Windows/DetoursServices`, "*.h"),
         ...globR(d`${sandboxSourceRoot}/Common`, "*.h"),
@@ -75,6 +87,7 @@ namespace EndpointSecuritySandbox {
 
     const includeDirectories : Directory[] = [
         sandboxRoot,
+        d`../Interpose`,
         d`${sandboxRoot}/UnitTests`,
         d`${sandboxSourceRoot}/Linux`,
         d`${sandboxSourceRoot}/Windows/DetoursServices`,
@@ -98,6 +111,15 @@ namespace EndpointSecuritySandbox {
 
     @@public
     export const broker : DerivedFile = isMacOsHost ? build() : undefined;
+
+    /**
+     * The library dyld injects into every process the broker supervises.
+     *
+     * Built as C rather than C++ on purpose: it runs inside processes that BuildXL does not own, so it
+     * must not pull in a C++ runtime that could differ from the one the host process already loaded.
+     */
+    @@public
+    export const interposeLibrary : DerivedFile = isMacOsHost ? buildInterposeLibrary() : undefined;
 
     /**
      * The self test drives the broker's engine from a recorded event source rather than from Endpoint
@@ -150,6 +172,40 @@ namespace EndpointSecuritySandbox {
             // more than one output and fails with "cannot specify -o when generating multiple
             // output files".
             dependencies: headers,
+            tags: ["compile", "macos", "sandbox"],
+        });
+
+        return result.getOutputFile(outFile);
+    }
+
+    function buildInterposeLibrary() : DerivedFile {
+        const outDir = Context.getNewOutputDirectory("bxl-interpose");
+        const outFile = p`${outDir}/libBuildXLInterpose.dylib`;
+
+        const args : Argument[] = [
+            Cmd.argument("-dynamiclib"),
+            Cmd.option("-o ", Artifact.output(outFile)),
+            Cmd.argument(Artifact.input(f`../Interpose/bxl-interpose.c`)),
+            Cmd.option("-arch ", targetArchitecture),
+            Cmd.argument("-std=c11"),
+            Cmd.argument(`-mmacosx-version-min=${minimumOsVersion}`),
+            Cmd.argument("-D_DARWIN_C_SOURCE"),
+            // Injected into arbitrary processes, so it must not export anything beyond the interpose
+            // table and must not depend on symbols the host process might resolve differently.
+            Cmd.argument("-fvisibility=hidden"),
+            Cmd.argument(qualifier.configuration === "debug" ? "-O0" : "-O2"),
+            Cmd.flag("-g", qualifier.configuration === "debug"),
+            Cmd.argument("-Wall"),
+            Cmd.argument("-Wextra"),
+            Cmd.argument("-Werror"),
+            Cmd.option("-install_name ", "@rpath/libBuildXLInterpose.dylib"),
+        ];
+
+        const result = Transformer.execute({
+            tool: clangCTool,
+            workingDirectory: outDir,
+            arguments: args,
+            dependencies: [f`../Interpose/InterposeProtocol.h`],
             tags: ["compile", "macos", "sandbox"],
         });
 

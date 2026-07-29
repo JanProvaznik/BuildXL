@@ -6077,7 +6077,7 @@ namespace BuildXL.Scheduler
 
                         if (OperatingSystemHelper.IsMacOS)
                         {
-                            Contract.Assert(sandboxKind == SandboxKind.Default || sandboxKind == SandboxKind.MacOsEndpointSecurity,
+                            Contract.Assert(sandboxKind == SandboxKind.Default || sandboxKind == SandboxKind.MacOs,
                                             $"Unknown macOS sandbox kind: {sandboxKind}");
                             sandboxConnection = new SandboxConnectionMacOs(SandboxFailureCallback);
                         }

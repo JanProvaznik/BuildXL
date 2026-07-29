@@ -224,7 +224,7 @@ Cache statistics are read from `BuildXL.stats` using the same keys `Execution.An
 python3 run_incrementality_benchmark.py --print-protocol          # the pre-registered protocol
 python3 run_incrementality_benchmark.py \
     --repo <repo> --bxl <bxl.sh> --target-file <leaf source file> \
-    --label macos-es --sandbox-kind MacOsEndpointSecurity --repeats 5 \
+    --label macos-es --sandbox-kind MacOs --repeats 5 \
     --out macos.json
 python3 run_incrementality_benchmark.py --combine macos.json linux.json --markdown parity.md
 ```

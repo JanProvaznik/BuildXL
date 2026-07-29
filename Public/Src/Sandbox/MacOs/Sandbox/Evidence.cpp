@@ -128,6 +128,8 @@ void EvidenceWriter::WriteSummary(const EvidenceSummary &summary)
              << ",\"fenceClosed\":" << (summary.fenceClosed ? "true" : "false")
              << ",\"supervisionQuiesced\":" << (summary.supervisionQuiesced ? "true" : "false")
              << ",\"lifecycleClosed\":" << (summary.lifecycleClosed ? "true" : "false")
+             << ",\"backendReportedLosses\":" << summary.backendReportedLosses
+             << ",\"eventsDroppedBeforeEngineStart\":" << summary.eventsDroppedBeforeEngineStart
              << ",\"childExitCode\":" << summary.childExitCode
              << ",\"taintReason\":\"" << Escape(TaintSetToString(summary.taint)) << "\""
              << ",\"cacheable\":" << (summary.taint == TaintReason::kNone ? "true" : "false")

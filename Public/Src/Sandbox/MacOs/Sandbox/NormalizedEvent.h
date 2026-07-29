@@ -136,6 +136,18 @@ struct NormalizedEvent
     /** ES message version. Unknown versions taint. */
     uint32_t messageVersion = 0;
 
+    /**
+     * True when `globalSequence` was assigned by the kernel and is therefore evidence about loss.
+     *
+     * Endpoint Security stamps every message with a per-client `global_seq_num`, so a gap in it is a
+     * statement that the kernel dropped something. The interposition backend has no such authority:
+     * its sequences are assigned per process in user space, so a "gap" across processes is normal
+     * interleaving and means nothing. Setting this false makes SequenceTracker abstain rather than
+     * manufacture a taint, and moves the loss claim to where it can actually be made -- the ingress,
+     * which sees each process's framing and reports through EventSource::BackendReportedLosses().
+     */
+    bool sequenceIsKernelAssigned = true;
+
     /** Mach absolute time the event was generated. */
     uint64_t machTime = 0;
 

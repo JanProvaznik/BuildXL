@@ -34,9 +34,17 @@ namespace BuildXL.Utilities.Core
         LinuxEBPF,
 
         /// <summary>
-        /// macOS-specific: using an Endpoint Security descendants client to observe file accesses
+        /// macOS-specific: observing file accesses through a supervising broker process.
         /// </summary>
-        MacOsEndpointSecurity,
+        /// <remarks>
+        /// Deliberately not named after a mechanism, unlike the Linux kinds. The broker picks its
+        /// observation backend when it starts: an Endpoint Security descendants client where the
+        /// restricted entitlement is available, and dyld interposition otherwise. Both are driven by
+        /// the same protocol engine and produce the same reports, and the backend that ran is recorded
+        /// in the evidence file. Naming the enum after one of them would make the setting a lie on
+        /// every machine that had to use the other.
+        /// </remarks>
+        MacOs,
     }
 
     /// <nodoc />
@@ -54,6 +62,6 @@ namespace BuildXL.Utilities.Core
         /// from silently getting the wrong behaviour at one of the decision points.
         /// </remarks>
         public static bool WrapsRootProcessInSupervisor(this SandboxKind kind) =>
-            kind == SandboxKind.LinuxEBPF || kind == SandboxKind.MacOsEndpointSecurity;
+            kind == SandboxKind.LinuxEBPF || kind == SandboxKind.MacOs;
     }
 }

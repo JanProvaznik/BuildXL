@@ -70,6 +70,13 @@ public:
     uint64_t NewerVersionCount() const { return m_newerVersionCount; }
 
     /**
+     * Events whose sequence was assigned in user space rather than by the kernel, and for which this
+     * tracker therefore made no loss claim at all. Non-zero means loss detection for those events
+     * lives in the ingress, not here.
+     */
+    uint64_t UserSpaceSequencedCount() const { return m_userSpaceSequencedCount; }
+
+    /**
      * Resets the per-epoch state. The caller is responsible for having already tainted the pip;
      * this only makes subsequent gap detection meaningful again.
      */
@@ -83,6 +90,7 @@ private:
     uint64_t m_observedCount = 0;
     uint64_t m_currentEpoch = 0;
     uint64_t m_newerVersionCount = 0;
+    uint64_t m_userSpaceSequencedCount = 0;
     bool m_epochInitialized = false;
 };
 

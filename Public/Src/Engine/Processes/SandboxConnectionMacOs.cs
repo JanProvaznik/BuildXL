@@ -81,7 +81,7 @@ namespace BuildXL.Processes
         private readonly ManagedFailureCallback m_failureCallback;
 
         /// <inheritdoc />
-        public SandboxKind Kind => SandboxKind.MacOsEndpointSecurity;
+        public SandboxKind Kind => SandboxKind.MacOs;
 
         /// <inheritdoc />
         public bool IsInTestMode { get; }

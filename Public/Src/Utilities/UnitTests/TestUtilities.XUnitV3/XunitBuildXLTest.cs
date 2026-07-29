@@ -79,7 +79,7 @@ namespace Test.BuildXL.TestUtilities.Xunit
                 switch (sandboxKind)
                 {
                     case SandboxKind.Default:
-                    case SandboxKind.MacOsEndpointSecurity:
+                    case SandboxKind.MacOs:
                         return new SandboxConnectionMacOs(FailureCallback, isInTestMode: true);
                     case SandboxKind.None:
                         return null;

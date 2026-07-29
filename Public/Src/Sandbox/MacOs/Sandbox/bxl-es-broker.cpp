@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -43,8 +44,16 @@
 #include "EsIngress.h"
 #include "Evidence.h"
 #include "FileAccessManifest.h"
+#include "InterposeIngress.h"
 #include "ReportSink.h"
 #include "SandboxEngine.h"
+#include "../Interpose/InterposeProtocol.h"
+
+#include <libgen.h>
+#include <libproc.h>
+#include <limits.h>
+#include <memory>
+#include <sys/stat.h>
 
 extern char **environ;
 
@@ -55,6 +64,13 @@ namespace {
 constexpr const char *kFamPathEnvVar = "__BUILDXL_FAM_PATH";
 constexpr const char *kEvidenceEnvVar = "__BUILDXL_MACOS_EVIDENCE_PATH";
 constexpr const char *kSupervisionTimeoutEnvVar = "__BUILDXL_MACOS_SUPERVISION_TIMEOUT_SECONDS";
+
+/**
+ * Which observation backend to use: "es", "interpose", or "auto" (the default).
+ *
+ * CODESYNC: Public/Src/Engine/Processes/SandboxConnectionMacOs.cs
+ */
+constexpr const char *kBackendEnvVar = "__BUILDXL_MACOS_SANDBOX_BACKEND";
 
 /** Exit code used when the broker itself fails, distinct from any plausible tool exit code. */
 constexpr int kBrokerFailureExitCode = 253;
@@ -254,6 +270,118 @@ bool LooksLikeReleaseManifest(const std::vector<char> &bytes)
     return flag == kReleaseManifestDebugFlag;
 }
 
+/**
+ * Locates libBuildXLInterpose.dylib.
+ *
+ * The deployment puts it beside the broker, so the broker's own path is the answer in every case
+ * BuildXL produces. The environment variable exists for the unit tests, which run the broker out of
+ * a build tree rather than a deployment.
+ */
+std::string FindInterposeLibrary(const char *brokerPath)
+{
+    if (const char *configured = getenv(BXL_INTERPOSE_LIBRARY_ENV_VAR))
+    {
+        if (*configured != '\0')
+        {
+            return configured;
+        }
+    }
+
+    char resolved[PATH_MAX];
+    memset(resolved, 0, sizeof(resolved));
+    if (proc_pidpath(getpid(), resolved, sizeof(resolved)) <= 0)
+    {
+        if (brokerPath == nullptr)
+        {
+            return std::string();
+        }
+
+        strncpy(resolved, brokerPath, sizeof(resolved) - 1);
+    }
+
+    std::string directory(resolved);
+    const size_t lastSlash = directory.find_last_of('/');
+    if (lastSlash == std::string::npos)
+    {
+        return std::string();
+    }
+
+    return directory.substr(0, lastSlash) + "/libBuildXLInterpose.dylib";
+}
+
+/**
+ * Chooses the observation backend.
+ *
+ * "auto" prefers Endpoint Security and falls back to interposition when it cannot be started, which
+ * on a machine without the restricted entitlement is every time. The fallback is deliberately not
+ * silent: the backend name is recorded in the evidence file and in the taint accounting, because
+ * "which backend observed this build" is the first question anyone reading the numbers should ask.
+ */
+std::unique_ptr<EventSource> CreateEventSource(
+    const char *brokerPath,
+    EventSource::EventHandler handler,
+    std::string &backendChoice,
+    std::string &errorMessage)
+{
+    const char *requested = getenv(kBackendEnvVar);
+    const std::string mode = requested != nullptr && *requested != '\0' ? requested : "auto";
+
+    if (mode != "interpose")
+    {
+        auto endpointSecurity = std::unique_ptr<EsIngress>(new EsIngress());
+        std::string esError;
+        if (endpointSecurity->Start(handler, esError))
+        {
+            backendChoice = "es";
+            return endpointSecurity;
+        }
+
+        if (mode == "es")
+        {
+            errorMessage = esError;
+            return nullptr;
+        }
+
+        errorMessage = esError;
+    }
+
+    auto interpose = std::unique_ptr<InterposeIngress>(new InterposeIngress());
+    const std::string socketPath = interpose->SocketPath();
+    const std::string libraryPath = FindInterposeLibrary(brokerPath);
+
+    if (libraryPath.empty())
+    {
+        errorMessage = "cannot locate libBuildXLInterpose.dylib next to the broker";
+        return nullptr;
+    }
+
+    struct stat libraryInfo;
+    if (stat(libraryPath.c_str(), &libraryInfo) != 0)
+    {
+        errorMessage = "the interpose library is not deployed at '" + libraryPath + "'";
+        return nullptr;
+    }
+
+    std::string interposeError;
+    if (!interpose->Start(handler, interposeError))
+    {
+        errorMessage = interposeError;
+        return nullptr;
+    }
+
+    // Set on the broker's own environment because posix_spawnp passes `environ` straight through, so
+    // this is what the tool and every descendant inherit. dyld strips DYLD_INSERT_LIBRARIES when it
+    // execs a SIP protected binary, which is why the injected library reports that case rather than
+    // relying on the variable still being present further down the tree.
+    setenv(BXL_INTERPOSE_SOCKET_ENV_VAR, socketPath.c_str(), 1);
+    setenv(BXL_INTERPOSE_LIBRARY_ENV_VAR, libraryPath.c_str(), 1);
+    setenv("DYLD_INSERT_LIBRARIES", libraryPath.c_str(), 1);
+
+    backendChoice = "interpose";
+    errorMessage.clear();
+    return interpose;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -313,32 +441,51 @@ int main(int argc, char **argv)
         return kBrokerFailureExitCode;
     }
 
-    EsIngress ingress;
+    const auto brokerStartedAt = std::chrono::steady_clock::now();
+
+    // The source is started before the engine exists, so events are routed through a pointer that is
+    // published only once the engine is running. The window is provably empty rather than merely
+    // small: no process is under observation until the tool is spawned, which happens far below.
+    // It is counted anyway, because "provably empty" is a claim that should fail loudly if wrong.
+    std::atomic<SandboxEngine *> enginePointer{nullptr};
+    std::atomic<uint64_t> eventsBeforeEngineExisted{0};
+    auto handler = [&enginePointer, &eventsBeforeEngineExisted](NormalizedEvent &&event) {
+        SandboxEngine *const engine = enginePointer.load(std::memory_order_acquire);
+        if (engine == nullptr)
+        {
+            eventsBeforeEngineExisted.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        engine->OnEvent(std::move(event));
+    };
+
+    std::string backendChoice;
+    std::string backendError;
+    std::unique_ptr<EventSource> ingress = CreateEventSource(argv[0], handler, backendChoice, backendError);
+    if (ingress == nullptr)
+    {
+        Fail("no macOS sandbox backend could be started: %s", backendError.c_str());
+        sink.WriteDebugMessage(
+            buildxl::linux::DebugEventSeverity::kError,
+            static_cast<int32_t>(getpid()),
+            std::string("macOS sandbox could not start: ") + backendError);
+        CloseReportStream(sink, &manifest, argv[0]);
+        return kBrokerFailureExitCode;
+    }
+
     const std::string noncePath = MakeNoncePath();
 
     SandboxEngine engine(
         &manifest,
         &sink,
-        ingress.BrokerIdentity(),
+        ingress->BrokerIdentity(),
         noncePath,
-        [&ingress](const std::string &nonce) { return ingress.EmitMarker(nonce); },
+        [&ingress](const std::string &nonce) { return ingress->EmitMarker(nonce); },
         EngineOptions());
 
     engine.Start();
-
-    // Subscribing before the tool exists is what makes the observation gap-free: a descendants client
-    // created now sees every process forked from here on, so there is no interval during which the
-    // tool could touch a file unobserved.
-    if (!ingress.Start([&engine](NormalizedEvent &&event) { engine.OnEvent(std::move(event)); }, errorMessage))
-    {
-        Fail("%s", errorMessage.c_str());
-        sink.WriteDebugMessage(
-            buildxl::linux::DebugEventSeverity::kError,
-            static_cast<int32_t>(getpid()),
-            std::string("macOS sandbox could not start: ") + errorMessage);
-        CloseReportStream(sink, &manifest, argv[0]);
-        return kBrokerFailureExitCode;
-    }
+    enginePointer.store(&engine, std::memory_order_release);
 
     // The baseline fence proves the client is live and delivering before anything is launched. If the
     // subscription silently did nothing, this is where it is caught - not after the pip has run.
@@ -348,13 +495,14 @@ int main(int argc, char **argv)
         // with a stream that was never proven to deliver, its accesses might never be reported, and
         // BuildXL would cache the result as though it had been observed. The fence exists precisely to
         // stop that, so its failure has to stop the launch.
-        Fail("the Endpoint Security stream did not deliver the baseline marker");
+        Fail("the %s sandbox stream did not deliver the baseline marker", ingress->BackendName());
         engine.Shutdown();
-        ingress.Stop();
+        ingress->Stop();
         sink.WriteDebugMessage(
             buildxl::linux::DebugEventSeverity::kError,
             static_cast<int32_t>(getpid()),
-            "macOS sandbox could not confirm the Endpoint Security stream was delivering; refusing to launch the tool unobserved");
+            std::string("macOS sandbox could not confirm the ") + ingress->BackendName()
+                + " stream was delivering; refusing to launch the tool unobserved");
         CloseReportStream(sink, &manifest, argv[0]);
         return kBrokerFailureExitCode;
     }
@@ -383,7 +531,7 @@ int main(int argc, char **argv)
     {
         Fail("cannot launch '%s': %s", argv[1], strerror(spawnResult));
         engine.Shutdown();
-        ingress.Stop();
+        ingress->Stop();
         sink.WriteDebugMessage(
             buildxl::linux::DebugEventSeverity::kError,
             static_cast<int32_t>(getpid()),
@@ -415,9 +563,28 @@ int main(int argc, char **argv)
     // tool finished" into "everything the tool did has been seen".
     engine.CloseStream();
     engine.Shutdown();
-    ingress.Stop();
+    ingress->Stop();
 
     TaintReason taint = engine.Evaluate(quiesced);
+
+    // The tracker abstains for backends whose sequences it does not own, so a backend that can detect
+    // its own losses has to be asked. Until now this interface existed and nothing called it, which
+    // meant an interposition drop would have been silently survivable -- the exact failure the whole
+    // taint mechanism is for.
+    const uint64_t backendLosses = ingress->BackendReportedLosses();
+    if (backendLosses > 0)
+    {
+        taint = taint | TaintReason::kKernelSequenceGap;
+    }
+
+    // Events delivered before the engine was published are dropped by the routing handler. The window
+    // is meant to be empty; if it ever is not, the pip must not be cached on the strength of it.
+    const uint64_t droppedBeforeEngine = eventsBeforeEngineExisted.load(std::memory_order_relaxed);
+    if (droppedBeforeEngine > 0)
+    {
+        taint = taint | TaintReason::kKernelSequenceGap;
+    }
+
     if (g_terminationRequested)
     {
         // The stream is complete and well formed, but it is a prefix of what the pip would have done.
@@ -431,7 +598,7 @@ int main(int argc, char **argv)
         // An error-severity debug message is how the Unix sandbox tells BuildXL that this pip's
         // observations are incomplete. BuildXL then refuses to cache the pip and re-runs it, which is
         // the whole reason it is safe to be conservative everywhere else in this broker.
-        sink.WriteTaint(taint, childPid, "macOS Endpoint Security sandbox");
+        sink.WriteTaint(taint, childPid, std::string("macOS sandbox (") + ingress->BackendName() + " backend)");
     }
 
     CloseReportStream(sink, &manifest, argv[0]);
@@ -440,7 +607,7 @@ int main(int argc, char **argv)
     if (evidencePath != nullptr && *evidencePath != '\0')
     {
         EvidenceWriter evidence;
-        if (evidence.Open(evidencePath, NewRunId(), std::to_string(manifest.GetPipId()), ingress.BackendName()))
+        if (evidence.Open(evidencePath, NewRunId(), std::to_string(manifest.GetPipId()), ingress->BackendName()))
         {
             EvidenceSummary summary;
             summary.eventsAccepted = stats.eventsAccepted;
@@ -458,6 +625,35 @@ int main(int argc, char **argv)
             summary.supervisionQuiesced = quiesced;
             summary.taint = taint;
             summary.childExitCode = toolExitCode;
+
+            // These were declared by the evidence schema and never filled in, so every evidence file
+            // ever written claimed the fence had not closed and that the run saw zero processes. A
+            // field that is always false is worse than an absent one: it reads as a measurement.
+            summary.markerAttempts = stats.markerAttempts;
+            summary.processCount = static_cast<uint32_t>(engine.Processes().TotalCount());
+            summary.fenceClosed = engine.Fence().CurrentState() == FenceProtocol::State::kClosed;
+            summary.lifecycleClosed = engine.Processes().IsClosed();
+            summary.wallClockNanos = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - brokerStartedAt).count());
+            summary.backendReportedLosses = backendLosses;
+            summary.eventsDroppedBeforeEngineStart = droppedBeforeEngine;
+
+            std::vector<uint64_t> samples = stats.callbackNanosSamples;
+            if (!samples.empty())
+            {
+                std::sort(samples.begin(), samples.end());
+                const auto percentile = [&samples](double fraction) {
+                    size_t index = static_cast<size_t>(fraction * static_cast<double>(samples.size()));
+                    if (index >= samples.size()) { index = samples.size() - 1; }
+                    return samples[index];
+                };
+
+                summary.callbackNanosP50 = percentile(0.50);
+                summary.callbackNanosP95 = percentile(0.95);
+                summary.callbackNanosP99 = percentile(0.99);
+                summary.callbackNanosP999 = percentile(0.999);
+            }
             evidence.WriteSummary(summary);
             evidence.Close();
         }
