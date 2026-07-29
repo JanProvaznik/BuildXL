@@ -17,6 +17,7 @@
 #include <cstdlib>
 
 #include "../Interpose/InterposeProtocol.h"
+#include "../Interpose/ShadowTool.h"
 
 namespace buildxl {
 namespace macos {
@@ -114,26 +115,48 @@ bool ReadFully(int descriptor, void *buffer, size_t length)
  * mode are verified before it is used. Another user cannot pre-create it and read the build's file
  * access stream, and if one has, this fails rather than proceeding.
  */
-std::string DefaultSocketPath(std::string &errorMessage)
+/**
+ * Creates a private directory under /tmp and refuses to use one that is not ours.
+ *
+ * /tmp is world writable with the sticky bit, so the directory is created 0700 and its ownership and
+ * mode are verified before it is used. Another user cannot pre-create it and read the build's file
+ * access stream, and if one has, this fails rather than proceeding.
+ */
+bool EnsurePrivateDirectory(const std::string &directory, std::string &errorMessage)
 {
-    const std::string directory = "/tmp/.bxl-sandbox-" + std::to_string(getuid());
-
     if (mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST)
     {
         errorMessage = "cannot create '" + directory + "': " + strerror(errno);
-        return std::string();
+        return false;
     }
 
     struct stat info;
     if (lstat(directory.c_str(), &info) != 0)
     {
         errorMessage = "cannot stat '" + directory + "': " + strerror(errno);
-        return std::string();
+        return false;
     }
 
     if (!S_ISDIR(info.st_mode) || info.st_uid != getuid() || (info.st_mode & (S_IRWXG | S_IRWXO)) != 0)
     {
         errorMessage = "'" + directory + "' is not a private directory owned by this user";
+        return false;
+    }
+
+    return true;
+}
+
+std::string SandboxDirectory()
+{
+    return "/tmp/.bxl-sandbox-" + std::to_string(getuid());
+}
+
+std::string DefaultSocketPath(std::string &errorMessage)
+{
+    const std::string directory = SandboxDirectory();
+
+    if (!EnsurePrivateDirectory(directory, errorMessage))
+    {
         return std::string();
     }
 
@@ -328,10 +351,34 @@ void InterposeIngress::ReadLoop(int descriptor)
         event.parent.pidversion = header.parentPidStartSeconds;
         event.sourceIsDirectory = (header.flags & kFlagSourceIsDirectory) != 0;
         event.destinationIsDirectory = (header.flags & kFlagDestinationIsDirectory) != 0;
+        event.sourceExists = (header.flags & kFlagSourceExists) != 0;
+        event.destinationExists = (header.flags & kFlagDestinationExists) != 0;
         event.sourcePathTruncated = (header.flags & kFlagSourceTruncated) != 0;
         event.destinationPathTruncated = (header.flags & kFlagDestinationTruncated) != 0;
         event.sourcePath = source;
         event.destinationPath = destination;
+
+        // The checker indexes the manifest by absolute path and asserts on anything else - including
+        // the empty string - so a malformed record has to stop here rather than take the broker down
+        // with it and lose the whole pip's stream. Only an exit legitimately names nothing. Counted as
+        // a gap, which taints: something happened that could not be modelled, so the pip must not be
+        // cached from this execution.
+        const bool namesAPath = !(header.kind == kRecordEvent && header.op == kOpExit);
+        if ((namesAPath && event.sourcePath.empty())
+            || (!event.sourcePath.empty() && event.sourcePath[0] != '/')
+            || (!event.destinationPath.empty() && event.destinationPath[0] != '/'))
+        {
+            m_recordGaps.fetch_add(1, std::memory_order_relaxed);
+            fprintf(
+                stderr,
+                "[bxl] macOS sandbox dropped a malformed record: kind=%u op=%u pid=%d src='%s' dst='%s'\n",
+                (unsigned)header.kind,
+                (unsigned)header.op,
+                (int)header.pid,
+                event.sourcePath.c_str(),
+                event.destinationPath.c_str());
+            continue;
+        }
 
         switch (header.kind)
         {
@@ -421,6 +468,22 @@ bool InterposeIngress::IsInjectable(const std::string &executablePath, std::stri
         return false;
     }
 
+    return true;
+}
+
+bool InterposeIngress::MakeInjectable(const std::string &executablePath, std::string &shadowPath, std::string &error)
+{
+    shadowPath.clear();
+    error.clear();
+
+    char resolved[BXL_SHADOW_PATH_MAX];
+    if (!BxlShadowResolve(executablePath.c_str(), resolved, sizeof(resolved)))
+    {
+        error = "no injectable copy of '" + executablePath + "' could be made";
+        return false;
+    }
+
+    shadowPath = resolved;
     return true;
 }
 

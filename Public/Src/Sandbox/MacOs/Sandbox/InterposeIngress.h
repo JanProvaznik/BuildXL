@@ -75,6 +75,26 @@ public:
      */
     static bool IsInjectable(const std::string &executablePath, std::string &reason);
 
+    /**
+     * Materializes an injectable copy of a System Integrity Protection binary, and returns its path.
+     *
+     * SIP is the one thing that makes this backend structurally weaker than the Linux one: dyld
+     * refuses to load the observation library into a protected binary *and* erases
+     * DYLD_INSERT_LIBRARIES from its environment, so the pip and everything it starts go unobserved.
+     * That is not a corner case on macOS - /bin/bash, /bin/sh and /usr/bin/rsync are all protected,
+     * and BuildXL's own SDK copies directories with rsync.
+     *
+     * A plain copy does not run: these are arm64e platform binaries, and the kernel kills a
+     * non-platform arm64e image outright. Ad-hoc signing the copy makes it an ordinary user binary,
+     * which both runs and accepts injection. The machine code is untouched; only the signature blob
+     * differs, and the copy is keyed on the original's size and modification time so an OS update
+     * produces a new one.
+     *
+     * Deliberately not applied to setuid binaries: a copy would not be setuid, so it would not be the
+     * tool the pip asked for.
+     */
+    static bool MakeInjectable(const std::string &executablePath, std::string &shadowPath, std::string &error);
+
     uint64_t BackendReportedLosses() const override { return m_recordGaps.load(std::memory_order_relaxed); }
 
     /** The path the injected library must connect to. */
