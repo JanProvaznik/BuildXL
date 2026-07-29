@@ -34,6 +34,7 @@
  */
 
 #include <dirent.h>
+#include <stdatomic.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libproc.h>
@@ -982,12 +983,93 @@ static int bxl_faccessat(int fd, const char *path, int mode, int flag)
     return result;
 }
 
+/**
+ * Opening a directory handle is a probe, not an enumeration.
+ *
+ * This was originally reported as kOpReadDir, and that one opcode cost 133 spurious cache misses on
+ * every incremental self-build. An enumeration record makes the engine record the directory's entire
+ * membership in the pip's path set, so the pip's strong fingerprint then depends on every name in
+ * that directory. Pips that merely open a shared directory -- and every NuGet download pip opens the
+ * shared package root -- were therefore invalidated whenever any other pip added a package to it.
+ * A leaf-only source edit went from 2 executed pips to 135.
+ *
+ * The Linux backend already draws the line in the right place: its opendir reports kGenericProbe and
+ * only readdir/getdents report an enumeration (Public/Src/Sandbox/Linux/detours.cpp). Matching that
+ * is both more precise and more faithful -- opening a handle genuinely does not read any names.
+ */
+/**
+ * Last descriptor reported as enumerated. See BxlNoteEnumerated for why this is a plain atomic
+ * rather than thread-local storage.
+ */
+static _Atomic int g_lastEnumeratedFd = -1;
+
 static DIR *bxl_opendir(const char *path)
 {
     DIR *const result = opendir(path);
-    ReportOne(kOpReadDir, path, result != NULL ? 0 : -1, errno, BXL_EXISTS_DIR);
+    ReportOne(kOpStat, path, result != NULL ? 0 : -1, errno, BXL_EXISTS_DIR);
+    // A fresh handle must re-report on its first read even if the kernel reused the descriptor
+    // number of a handle that was just closed. See BxlNoteEnumerated.
+    atomic_store_explicit(&g_lastEnumeratedFd, -1, memory_order_relaxed);
     return result;
 }
+
+static DIR *bxl_fdopendir(int fd)
+{
+    DIR *const result = fdopendir(fd);
+    ReportOneAt(kOpStat, fd, "", result != NULL ? 0 : -1, errno, BXL_EXISTS_DIR);
+    atomic_store_explicit(&g_lastEnumeratedFd, -1, memory_order_relaxed);
+    return result;
+}
+
+/**
+ * Enumeration is per directory, but readdir is per entry, so a thousand-entry directory would send a
+ * thousand identical records. Collapsing consecutive reads of the same descriptor removes that cost
+ * without losing information: the records were identical, so dropping the repeats drops nothing.
+ *
+ * The memo is a single atomic int, deliberately not thread-local -- a __thread variable in a
+ * DYLD_INSERT_LIBRARIES library is allocated on first touch, which here would happen inside an
+ * interposed libc call on a thread dyld has not finished setting up, and that is fatal.
+ *
+ * Two threads enumerating different directories will thrash the memo and re-report. That is the safe
+ * direction: this may over-report, never under-report.
+ */
+static void BxlNoteEnumerated(DIR *dirp)
+{
+    if (dirp == NULL)
+    {
+        return;
+    }
+
+    const int fd = dirfd(dirp);
+    if (fd < 0)
+    {
+        return;
+    }
+
+    if (atomic_exchange_explicit(&g_lastEnumeratedFd, fd, memory_order_relaxed) != fd)
+    {
+        ReportOneAt(kOpReadDir, fd, "", 0, 0, BXL_EXISTS_DIR);
+    }
+}
+
+static struct dirent *bxl_readdir(DIR *dirp)
+{
+    struct dirent *const result = readdir(dirp);
+    BxlNoteEnumerated(dirp);
+    return result;
+}
+
+// readdir_r is deprecated, but a program that calls it still enumerates a directory, and an
+// observer that declines to watch deprecated entry points is simply an observer with a hole in it.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static int bxl_readdir_r(DIR *dirp, struct dirent *entry, struct dirent **out)
+{
+    const int result = readdir_r(dirp, entry, out);
+    BxlNoteEnumerated(dirp);
+    return result;
+}
+#pragma clang diagnostic pop
 
 static ssize_t bxl_readlink(const char *path, char *buffer, size_t size)
 {
@@ -1440,6 +1522,12 @@ BXL_INTERPOSE(bxl_fstatat, fstatat)
 BXL_INTERPOSE(bxl_access, access)
 BXL_INTERPOSE(bxl_faccessat, faccessat)
 BXL_INTERPOSE(bxl_opendir, opendir)
+BXL_INTERPOSE(bxl_fdopendir, fdopendir)
+BXL_INTERPOSE(bxl_readdir, readdir)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+BXL_INTERPOSE(bxl_readdir_r, readdir_r)
+#pragma clang diagnostic pop
 BXL_INTERPOSE(bxl_readlink, readlink)
 BXL_INTERPOSE(bxl_realpath, realpath)
 BXL_INTERPOSE(bxl_mkdir, mkdir)
