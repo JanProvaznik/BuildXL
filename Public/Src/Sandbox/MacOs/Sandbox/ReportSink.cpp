@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #include <errno.h>
+#include <stdlib.h>
+#include <string>
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
@@ -13,6 +15,40 @@
 
 namespace buildxl {
 namespace macos {
+
+namespace {
+
+/**
+ * Diagnostic tee. When __BUILDXL_MACOS_REPORT_TEE names a file, every report this broker writes to
+ * the managed reader is also appended there in its wire form. The managed side only ever surfaces
+ * the *conclusions* it drew from a report, so when a build disagrees with a standalone repro this is
+ * the only way to see what was actually sent. Off unless the variable is set.
+ */
+void TeeReport(const char *buffer, unsigned int length)
+{
+    static int s_teeFd = [] {
+        // The engine does not forward its own environment to the broker, so a marker file is the
+        // only way to turn this on for a real build. Either form works.
+        const char *path = getenv("__BUILDXL_MACOS_REPORT_TEE");
+        if (path != nullptr)
+        {
+            return open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        }
+        return open("/tmp/.bxl-macos-report-tee", O_WRONLY | O_APPEND);
+    }();
+
+    if (s_teeFd < 0 || length <= sizeof(uint32_t))
+    {
+        return;
+    }
+
+    // Skip the length prefix; append a newline so the file is greppable.
+    std::string line(buffer + sizeof(uint32_t), length - sizeof(uint32_t));
+    line.push_back('\n');
+    (void)write(s_teeFd, line.data(), line.size());
+}
+
+} // anonymous namespace
 
 ReportSink::~ReportSink()
 {
@@ -166,6 +202,8 @@ TaintReason ReportSink::WriteOneReport(buildxl::linux::SandboxEvent &event, cons
         m_writeFailures++;
         return TaintReason::kReportSinkFailure;
     }
+
+    TeeReport(buffer.data(), reportLength);
 
     if (!WriteRaw(buffer.data(), reportLength))
     {
