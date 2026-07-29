@@ -338,14 +338,90 @@ static size_t AbsolutizeAtRaw(int fd, const char *path, char *buffer, size_t buf
     return baseLength + 1 + pathLength;
 }
 
+/**
+ * Collapses "." and ".." segments, and runs of slashes, in place.
+ *
+ * The engine matches a reported path against the pip's manifest by string. An uncollapsed path
+ * therefore misses every rule that names the file, so a perfectly ordinary "cp ../../input out"
+ * is reported as an undeclared read of a file the pip explicitly depends on. What made this
+ * expensive to find is that the engine renders the collapsed form in its own messages, so the
+ * violation it prints names a path that is, as printed, allowed.
+ *
+ * Lexical, not realpath(). realpath() resolves symlinks, which would make a build under /tmp report
+ * /private/tmp and disagree with everything the spec declared, and it fails outright on a path that
+ * does not exist -- which is precisely the absent-path probe the sandbox most needs to report.
+ * Collapsing ".." lexically is not the same question as resolving it when a component is a symlink,
+ * and the engine's own path table answers it lexically too, so this agrees with the thing it has to
+ * agree with.
+ */
+static size_t NormalizeInPlace(char *buffer, size_t length)
+{
+    if (length == 0 || buffer[0] != '/')
+    {
+        return length;
+    }
+
+    size_t write = 1;
+    size_t read = 1;
+
+    while (read < length)
+    {
+        size_t end = read;
+        while (end < length && buffer[end] != '/')
+        {
+            end++;
+        }
+
+        const size_t segment = end - read;
+        if (segment == 0 || (segment == 1 && buffer[read] == '.'))
+        {
+            // An empty segment from a doubled slash, or an explicit "here". Both mean nothing.
+        }
+        else if (segment == 2 && buffer[read] == '.' && buffer[read + 1] == '.')
+        {
+            // Step back over the segment already written. At the root there is nothing to step
+            // back over, and "/.." is the root, so leaving write alone is the whole rule.
+            if (write > 1)
+            {
+                write--;
+                while (write > 1 && buffer[write - 1] != '/')
+                {
+                    write--;
+                }
+            }
+        }
+        else
+        {
+            memmove(buffer + write, buffer + read, segment);
+            write += segment;
+            if (end < length)
+            {
+                buffer[write++] = '/';
+            }
+        }
+
+        read = end + 1;
+    }
+
+    // A trailing slash names the same directory and the engine never writes one.
+    if (write > 1 && buffer[write - 1] == '/')
+    {
+        write--;
+    }
+
+    return write;
+}
+
 static size_t Absolutize(const char *path, char *buffer, size_t bufferSize)
 {
-    return MapShadow(buffer, AbsolutizeRaw(path, buffer, bufferSize), bufferSize);
+    const size_t length = NormalizeInPlace(buffer, AbsolutizeRaw(path, buffer, bufferSize));
+    return MapShadow(buffer, length, bufferSize);
 }
 
 static size_t AbsolutizeAt(int fd, const char *path, char *buffer, size_t bufferSize)
 {
-    return MapShadow(buffer, AbsolutizeAtRaw(fd, path, buffer, bufferSize), bufferSize);
+    const size_t length = NormalizeInPlace(buffer, AbsolutizeAtRaw(fd, path, buffer, bufferSize));
+    return MapShadow(buffer, length, bufferSize);
 }
 
 /**
