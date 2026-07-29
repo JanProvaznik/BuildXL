@@ -87,13 +87,114 @@ static inline int BxlShadowEnsureDirectory(const char *directory)
  * The hash is over the full path, so /bin/bash and /opt/homebrew/bin/bash cannot collide. The size and
  * modification time make an OS update produce a new name rather than silently reuse a stale copy.
  */
+/**
+ * Locale-free string building.
+ *
+ * Nothing here may call snprintf, and the reason is not style. These functions run inside interposed
+ * libc calls, and one of the calls a process makes early is setlocale, which opens the locale file
+ * while holding the locale lock. The open is interposed, the interposer builds a path, and snprintf
+ * consults the locale for the decimal separator - on the same lock, on the same thread. libplatform
+ * detects the recursion and aborts the process with SIGKILL:
+ *
+ *     BUG IN CLIENT OF LIBPLATFORM: Trying to recursively lock an os_unfair_lock
+ *
+ * Every process that runs a shadowed tool calls setlocale, so this is not an edge case; it killed
+ * every shadowed tool until the formatting was made locale-free. Appending returns 0 once the buffer
+ * is exhausted, and callers check once at the end rather than after every part.
+ */
+typedef struct
+{
+    char *buffer;
+    size_t capacity;
+    size_t length;
+    int overflowed;
+} BxlAppender;
+
+static inline void BxlAppendInit(BxlAppender *appender, char *buffer, size_t capacity)
+{
+    appender->buffer = buffer;
+    appender->capacity = capacity;
+    appender->length = 0;
+    appender->overflowed = capacity == 0;
+
+    if (capacity > 0)
+    {
+        buffer[0] = '\0';
+    }
+}
+
+static inline void BxlAppendText(BxlAppender *appender, const char *text)
+{
+    size_t index = 0;
+
+    if (appender->overflowed || text == NULL)
+    {
+        return;
+    }
+
+    while (text[index] != '\0')
+    {
+        if (appender->length + 1 >= appender->capacity)
+        {
+            appender->overflowed = 1;
+            return;
+        }
+
+        appender->buffer[appender->length++] = text[index++];
+    }
+
+    appender->buffer[appender->length] = '\0';
+}
+
+static inline void BxlAppendUnsigned(BxlAppender *appender, unsigned long long value, int width, int hex)
+{
+    char digits[32];
+    int count = 0;
+    const char *alphabet = "0123456789abcdef";
+    const unsigned long long radix = hex ? 16ULL : 10ULL;
+
+    do
+    {
+        digits[count++] = alphabet[value % radix];
+        value /= radix;
+    } while (value != 0 && count < (int)sizeof(digits));
+
+    while (count < width && count < (int)sizeof(digits))
+    {
+        digits[count++] = '0';
+    }
+
+    while (count > 0)
+    {
+        char one[2];
+        one[0] = digits[--count];
+        one[1] = '\0';
+        BxlAppendText(appender, one);
+    }
+}
+
+static inline int BxlAppendDone(const BxlAppender *appender)
+{
+    return !appender->overflowed;
+}
+
+/** Writes "/tmp/.bxl-sandbox-<uid>" into the buffer. */
+static inline int BxlShadowRoot(char *out, size_t outSize)
+{
+    BxlAppender appender;
+    BxlAppendInit(&appender, out, outSize);
+    BxlAppendText(&appender, "/tmp/.bxl-sandbox-");
+    BxlAppendUnsigned(&appender, (unsigned long long)getuid(), 0, 0);
+    return BxlAppendDone(&appender);
+}
+
 static inline int BxlShadowPath(const char *path, const struct stat *info, char *out, size_t outSize)
 {
     uint64_t hash = 14695981039346656037ULL;
     const char *cursor = path;
     const char *base = path;
     const char *slash = strrchr(path, '/');
-    int written;
+    BxlAppender appender;
 
     while (*cursor != '\0')
     {
@@ -106,18 +207,21 @@ static inline int BxlShadowPath(const char *path, const struct stat *info, char 
         base = slash + 1;
     }
 
-    written = snprintf(
-        out,
-        outSize,
-        "/tmp/.bxl-sandbox-%u/tools/%s-%016llx-%llu-%lld.%09ld",
-        (unsigned)getuid(),
-        base,
-        (unsigned long long)hash,
-        (unsigned long long)info->st_size,
-        (long long)info->st_mtimespec.tv_sec,
-        (long)info->st_mtimespec.tv_nsec);
+    BxlAppendInit(&appender, out, outSize);
+    BxlAppendText(&appender, "/tmp/.bxl-sandbox-");
+    BxlAppendUnsigned(&appender, (unsigned long long)getuid(), 0, 0);
+    BxlAppendText(&appender, "/tools/");
+    BxlAppendText(&appender, base);
+    BxlAppendText(&appender, "-");
+    BxlAppendUnsigned(&appender, (unsigned long long)hash, 16, 1);
+    BxlAppendText(&appender, "-");
+    BxlAppendUnsigned(&appender, (unsigned long long)info->st_size, 0, 0);
+    BxlAppendText(&appender, "-");
+    BxlAppendUnsigned(&appender, (unsigned long long)info->st_mtimespec.tv_sec, 0, 0);
+    BxlAppendText(&appender, ".");
+    BxlAppendUnsigned(&appender, (unsigned long long)info->st_mtimespec.tv_nsec, 9, 0);
 
-    return written > 0 && (size_t)written < outSize;
+    return BxlAppendDone(&appender);
 }
 
 /** Copies a file's bytes into a new private executable. */
@@ -231,11 +335,23 @@ static inline void BxlShadowWriteOrigin(const char *shadow, const char *original
 {
     char sidecar[BXL_SHADOW_PATH_MAX + 32];
     char staging[BXL_SHADOW_PATH_MAX + 64];
+    BxlAppender appender;
     int descriptor;
     size_t length;
 
-    if (snprintf(sidecar, sizeof(sidecar), "%s.origin", shadow) <= 0
-        || snprintf(staging, sizeof(staging), "%s.%u", sidecar, (unsigned)getpid()) <= 0)
+    BxlAppendInit(&appender, sidecar, sizeof(sidecar));
+    BxlAppendText(&appender, shadow);
+    BxlAppendText(&appender, ".origin");
+    if (!BxlAppendDone(&appender))
+    {
+        return;
+    }
+
+    BxlAppendInit(&appender, staging, sizeof(staging));
+    BxlAppendText(&appender, sidecar);
+    BxlAppendText(&appender, ".");
+    BxlAppendUnsigned(&appender, (unsigned long long)getpid(), 0, 0);
+    if (!BxlAppendDone(&appender))
     {
         return;
     }
@@ -269,6 +385,7 @@ static inline int BxlShadowOrigin(const char *image, char *out, size_t outSize)
 {
     char sidecar[BXL_SHADOW_PATH_MAX + 32];
     char prefix[64];
+    BxlAppender appender;
     int descriptor;
     ssize_t got;
 
@@ -284,13 +401,19 @@ static inline int BxlShadowOrigin(const char *image, char *out, size_t outSize)
         image += 8;
     }
 
-    if (snprintf(prefix, sizeof(prefix), "/tmp/.bxl-sandbox-%u/tools/", (unsigned)getuid()) <= 0
-        || strncmp(image, prefix, strlen(prefix)) != 0)
+    BxlAppendInit(&appender, prefix, sizeof(prefix));
+    BxlAppendText(&appender, "/tmp/.bxl-sandbox-");
+    BxlAppendUnsigned(&appender, (unsigned long long)getuid(), 0, 0);
+    BxlAppendText(&appender, "/tools/");
+    if (!BxlAppendDone(&appender) || strncmp(image, prefix, appender.length) != 0)
     {
         return 0;
     }
 
-    if (snprintf(sidecar, sizeof(sidecar), "%s.origin", image) <= 0)
+    BxlAppendInit(&appender, sidecar, sizeof(sidecar));
+    BxlAppendText(&appender, image);
+    BxlAppendText(&appender, ".origin");
+    if (!BxlAppendDone(&appender))
     {
         return 0;
     }
@@ -327,6 +450,7 @@ static inline int BxlShadowResolve(const char *path, char *out, size_t outSize)
     struct stat existing;
     char staging[BXL_SHADOW_PATH_MAX + 32];
     char directory[64];
+    BxlAppender appender;
 
     if (path == NULL || out == NULL || stat(path, &info) != 0)
     {
@@ -348,8 +472,7 @@ static inline int BxlShadowResolve(const char *path, char *out, size_t outSize)
         return 1;
     }
 
-    snprintf(directory, sizeof(directory), "/tmp/.bxl-sandbox-%u", (unsigned)getuid());
-    if (!BxlShadowEnsureDirectory(directory))
+    if (!BxlShadowRoot(directory, sizeof(directory)) || !BxlShadowEnsureDirectory(directory))
     {
         return 0;
     }
@@ -362,7 +485,11 @@ static inline int BxlShadowResolve(const char *path, char *out, size_t outSize)
 
     // Built under a unique name and renamed into place, so a concurrent process either sees no copy or
     // a complete one. BuildXL runs one broker per executing pip, so this races constantly.
-    if (snprintf(staging, sizeof(staging), "%s.tmp.%u", out, (unsigned)getpid()) <= 0)
+    BxlAppendInit(&appender, staging, sizeof(staging));
+    BxlAppendText(&appender, out);
+    BxlAppendText(&appender, ".tmp.");
+    BxlAppendUnsigned(&appender, (unsigned long long)getpid(), 0, 0);
+    if (!BxlAppendDone(&appender))
     {
         return 0;
     }

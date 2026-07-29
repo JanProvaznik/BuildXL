@@ -224,14 +224,17 @@ static void SendRecord(
  *
  * A shadowed process reads and stats its own image - dyld does, and so does anything that asks where
  * it is running from - and reporting the copy would put a private cache directory into the build's
- * observed accesses in place of the tool the pip declared, which is both wrong and a violation. The
- * answer is cached because a process has one image and asks about it repeatedly.
+ * observed accesses in place of the tool the pip declared, which is both wrong and a violation.
+ *
+ * Deliberately uncached. The obvious optimisation is a thread-local memo of the last shadow seen,
+ * and it is fatal: a __thread buffer in a DYLD_INSERT_LIBRARIES library is allocated on first touch,
+ * and first touch happens inside an interposed libc call, early, on a thread dyld has not finished
+ * setting up. The process is SIGKILLed before main. No cache is needed anyway - BxlShadowResolve
+ * begins with a prefix compare against the shadow directory, so every path that is not a shadow
+ * costs one strncmp, and a process asks where it is running from a handful of times at startup.
  */
 static size_t MapShadow(char *buffer, size_t length, size_t bufferSize)
 {
-    static __thread char cachedShadow[BXL_SHADOW_PATH_MAX];
-    static __thread char cachedOrigin[BXL_SHADOW_PATH_MAX];
-
     if (length == 0 || length >= bufferSize)
     {
         return length;
@@ -239,29 +242,14 @@ static size_t MapShadow(char *buffer, size_t length, size_t bufferSize)
 
     buffer[length] = '\0';
 
-    if (cachedShadow[0] != '\0' && strcmp(buffer, cachedShadow) == 0)
-    {
-        const size_t originLength = strlen(cachedOrigin);
-        if (originLength < bufferSize)
-        {
-            memcpy(buffer, cachedOrigin, originLength);
-            return originLength;
-        }
-
-        return length;
-    }
-
     char origin[BXL_SHADOW_PATH_MAX];
     if (!BxlShadowOrigin(buffer, origin, sizeof(origin)))
     {
         return length;
     }
 
-    strlcpy(cachedShadow, buffer, sizeof(cachedShadow));
-    strlcpy(cachedOrigin, origin, sizeof(cachedOrigin));
-
     const size_t originLength = strlen(origin);
-    if (originLength >= bufferSize)
+    if (originLength == 0 || originLength >= bufferSize)
     {
         return length;
     }
@@ -488,7 +476,40 @@ static uint16_t OpenedFlags(int fd)
  * empty path into the access checker, which indexes the manifest by absolute path. Callers below
  * therefore drop the record rather than send a nameless one.
  */
-static void ReportOne(uint16_t op, const char *path, int result, int capturedErrno, uint16_t onSuccess)
+/*
+ * An observer has to be invisible, and errno is part of being invisible.
+ *
+ * Every interposer below runs its report *after* the real call has already set errno, and reporting
+ * is not free of syscalls: it resolves the path (which can open and read a shadow's sidecar) and
+ * then writes the record to a socket. Each of those overwrites errno, so without this the caller
+ * reads the report's errno instead of its own.
+ *
+ * This is not cosmetic. libuv inspects errno after every I/O return, and a value it did not expect
+ * makes it tear down a poll registration while the handle stays referenced; the event loop then
+ * blocks forever in kevent() on a kqueue with nothing in it. That is what made npm hang under the
+ * sandbox while the same command succeeded outside it: not a policy decision, not a lost event, just
+ * a number the observer forgot to put back.
+ *
+ * The macros are deliberately spelled like the functions they replace so that call sites read the
+ * same as they always did; the definitions above are the only place the Core names appear.
+ */
+#define BXL_PRESERVING_ERRNO(call)                                                                 \
+    do                                                                                             \
+    {                                                                                              \
+        const int bxlSavedErrno = errno;                                                           \
+        call;                                                                                      \
+        errno = bxlSavedErrno;                                                                     \
+    } while (0)
+
+#define ReportOne(...) BXL_PRESERVING_ERRNO(ReportOneCore(__VA_ARGS__))
+#define ReportOneAt(...) BXL_PRESERVING_ERRNO(ReportOneAtCore(__VA_ARGS__))
+#define ReportTwo(...) BXL_PRESERVING_ERRNO(ReportTwoCore(__VA_ARGS__))
+#define ReportTwoAt(...) BXL_PRESERVING_ERRNO(ReportTwoAtCore(__VA_ARGS__))
+#define ReportExec(...) BXL_PRESERVING_ERRNO(ReportExecCore(__VA_ARGS__))
+#define ReportUnobservable(...) BXL_PRESERVING_ERRNO(ReportUnobservableCore(__VA_ARGS__))
+#define ReportIntermediateSymlinks(...) BXL_PRESERVING_ERRNO(ReportIntermediateSymlinksCore(__VA_ARGS__))
+
+static void ReportOneCore(uint16_t op, const char *path, int result, int capturedErrno, uint16_t onSuccess)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -518,7 +539,7 @@ static void ReportOne(uint16_t op, const char *path, int result, int capturedErr
     t_reporting = 0;
 }
 
-static void ReportOneAt(uint16_t op, int fd, const char *path, int result, int capturedErrno, uint16_t onSuccess)
+static void ReportOneAtCore(uint16_t op, int fd, const char *path, int result, int capturedErrno, uint16_t onSuccess)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -548,7 +569,7 @@ static void ReportOneAt(uint16_t op, int fd, const char *path, int result, int c
     t_reporting = 0;
 }
 
-static void ReportTwo(uint16_t op, const char *source, const char *destination, int result, int capturedErrno, uint16_t onSuccess)
+static void ReportTwoCore(uint16_t op, const char *source, const char *destination, int result, int capturedErrno, uint16_t onSuccess)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -665,11 +686,18 @@ static void Connect(void)
  */
 static void OnForkInChild(void)
 {
+    // This runs inside fork() on the child side, so the very next thing the child does is read errno
+    // - libuv's spawn path checks it between fork and exec and reports what it finds as a spawn
+    // failure. Reconnecting must not look like one.
+    const int savedErrno = errno;
+
     // The parent's descriptor belongs to the parent; closing it here would not disturb the parent's
     // own copy, but leaving it would corrupt the shared stream.
     g_socket = -1;
     pthread_mutex_init(&g_lock, NULL);
     Connect();
+
+    errno = savedErrno;
 }
 
 __attribute__((constructor)) static void OnLoad(void)
@@ -742,7 +770,7 @@ static const char *Injectable(const char *path, char *scratch, size_t size)
     return BxlShadowResolve(path, scratch, size) ? scratch : path;
 }
 
-static void ReportExec(uint16_t op, const char *path, const char *image)
+static void ReportExecCore(uint16_t op, const char *path, const char *image)
 {
     if (t_reporting || g_socket < 0)
     {
@@ -774,7 +802,7 @@ static void ReportExec(uint16_t op, const char *path, const char *image)
     t_reporting = 0;
 }
 
-static void ReportTwoAt(
+static void ReportTwoAtCore(
     uint16_t op,
     int sourceFd,
     const char *source,
@@ -821,7 +849,7 @@ static void ReportTwoAt(
  * adding one more access. Reporting them as ordinary accesses would be worse than not reporting them
  * at all, because the report would look complete.
  */
-static void ReportUnobservable(const char *path, const char *reason)
+static void ReportUnobservableCore(const char *path, const char *reason)
 {
     (void)reason;
 
@@ -976,7 +1004,7 @@ static ssize_t bxl_readlink(const char *path, char *buffer, size_t size)
  * report_intermediate_symlinks() in the Linux sandbox.
  * CODESYNC: Public/Src/Sandbox/Linux/detours.cpp (realpath)
  */
-static void ReportIntermediateSymlinks(const char *path)
+static void ReportIntermediateSymlinksCore(const char *path)
 {
     if (path == NULL)
     {
