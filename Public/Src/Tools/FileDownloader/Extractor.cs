@@ -186,10 +186,17 @@ namespace Tool.Download
         /// Files are often transited through Windows OS, where these executable permissions are not natively supported, potentially stripping these permissions.
         /// Without execute permissions, files like node.exe won't run after they are retrieved via DownloadResolver, impacting the build. Given the difficulty in identifying executables, all files are granted execute permissions to avoid this issue.
         /// Also this change also makes the DownloadResolver to be reliably used by our customers.
+        ///
+        /// The guard is on Unix rather than on Linux because nothing in the paragraph above is
+        /// specific to Linux: an archive that lost its mode bits on the way through Windows has lost
+        /// them for every reader. macOS was excluded only because nothing ran there. It surfaces as a
+        /// cold-cache-only failure - the first extraction can leave the bit intact, and it is the
+        /// rebuild from an empty cache that produces the unrunnable copy - which is why it survived
+        /// this long: 'dotnet' arrives as -rw-r--r-- and every compile pip fails to launch it.
         /// </remarks>
         private void SetExecutePermissionsForExtractedFiles(string target)
         {
-            if (OperatingSystemHelper.IsLinuxOS)
+            if (OperatingSystemHelper.IsUnixOS)
             {
                 var files = Directory.EnumerateFiles(target, "*", SearchOption.AllDirectories);
 
