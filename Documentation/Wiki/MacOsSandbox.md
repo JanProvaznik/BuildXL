@@ -1220,14 +1220,15 @@ using the caller's own string, it could name any of the six.
 
 That hypothesis has been tested rather than argued about, and it is **refuted**:
 
-- **The observer reports the path the caller passed.** `files/interpose-listen.py` is a standalone
-  listener for the wire protocol: it runs a program under `libBuildXLInterpose.dylib` with no broker
-  and no build, and prints every record. Against a two-link inode it reports `/tmp/hltest/alias.bin`
+- **The observer reports the path the caller passed.**
+  `Public/Src/Sandbox/MacOs/Interpose/interpose-trace.py` is a standalone listener for the wire
+  protocol: it runs a program under `libBuildXLInterpose.dylib` with no broker and no build, and
+  prints every record. Against a two-link inode it reports `/tmp/hltest/alias.bin`
   when the program opens the alias and `/tmp/hltest/real.bin` when it opens the other link. No
   resolution happens.
 - **Nothing downstream canonicalises either.** The interposer is lexical on purpose (§7), the broker
   never calls `realpath`, and BuildXL's managed report path has no identity-based reverse lookup.
-- **The tool does not read that path.** Running the shipped deployment under the listener produces 516
+- **The tool does not read that path.** Running the shipped deployment under the tracer produces 516
   records and **zero** under `Out/Bin`. Independently, in a *successful* cold build with
   `/logObservedFileAccesses+`, the same pip produced 502 access reports and **zero** under `Out/Bin`.
 - **It is not cross-pip attribution.** Each pip gets its own broker and its own socket, so a record
