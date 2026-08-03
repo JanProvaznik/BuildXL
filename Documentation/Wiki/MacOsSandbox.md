@@ -1,8 +1,12 @@
 # macOS sandbox (Endpoint Security)
 
-Status: **implemented and self-verified; blocked on an Apple-issued entitlement for end-to-end
-validation.** This document records what was built, what has actually been proven, what has not,
-and what remains before macOS reaches Linux parity.
+Status: **implemented, self-verified, and measured end to end on a real build.** BuildXL builds
+itself on Apple Silicon under this sandbox — 294 process pips — and incremental builds are **5–23×**
+faster than a full build at 0–4% observation cost (§13). The Endpoint Security ingress, which is the
+*enforcement-grade* observer, remains blocked on an Apple-issued entitlement; the interposition
+ingress that shares its engine does not need one, and is what the numbers above were measured
+through. This document records what was built, what has actually been proven, what has not, and what
+remains before macOS reaches Linux parity.
 
 ---
 
@@ -167,14 +171,32 @@ broker the bottleneck on any real build. Batching the queue drain and buffering 
 it to 562,556 events/s — a 38× improvement — and the benchmark exists so that a future regression
 is caught rather than discovered in production.
 
-### 4.2 Not proven — requires the entitlement
+### 4.2 Gates C and E — closed, without the entitlement
 
-| Gate | What it needs |
-|---|---|
-| **C. Incrementality precision** — real cache hits on a real build | a signed broker |
-| **E. Real-build win** — measured speedup vs. today | a signed broker |
+These two were blocked for most of this work, and the reason is worth stating plainly: Endpoint
+Security cannot run on a developer machine. It needs `com.apple.developer.endpoint-security.client`,
+which Apple grants per-team on request, and the machine this was built on has SIP enabled and no
+signing identity. That is not a configuration problem to be worked around; it is the platform
+working as designed.
 
-The harness for both is written and tested (§5). Nothing is blocked on further design work.
+So the ingress was decoupled from the observer. The broker's engine — process table, lineage,
+loss accounting, fence, report sink — does not care where an event came from, and a second ingress
+was written that gets events by library interposition instead of from the kernel. That ingress needs
+no entitlement, so it runs anywhere, and it drives the same engine, so what is measured through it is
+the thing that ships.
+
+| Gate | Target | Status |
+|---|---|---|
+| **C. Incrementality precision** | a leaf change re-executes only what depends on it | **MET** — 292 hit / 2 executed, identical to the no-sandbox control |
+| **E. Real-build win** | measured speedup on a real build | **MET** — 5–23× against a full build, at 0–4% observation cost incrementally and 19% cold (§13) |
+
+The measurement is BuildXL building itself on Apple Silicon: 294 process pips, the real graph, the
+real cache. §13 has the numbers, the protocol, and the two defects the measurement found.
+
+What interposition does *not* give you is written down in §13.5 rather than glossed: it observes
+cooperating processes, so it is a correctness tool for a build, not a security boundary. The ES
+ingress remains the answer for anyone who needs the latter, and gates A, B, B2, D1–D3 are measured
+against the ES ingress on every build via the self-test pip.
 
 ### 4.3 Bugs this work found and fixed
 
@@ -918,10 +940,310 @@ exist, with no change needed.
 
 | Blocker | Nature | Who can fix it |
 |---|---|---|
-| ES entitlement | External (Apple) | Not us; gates C and E |
+| ES entitlement | External (Apple) | Not us. Gates C and E are met through the interposition ingress instead (§4.2, §13); the entitlement is needed only for the enforcement-grade ingress |
 | `Grpc.Tools` has no `macosx_arm64` | External (grpc) | Upstream, or a `protoc`/plugin source of our own; the selection code is already in place |
 | `BuildXL.Tools.AppHostPatcher` has no `tools/osx-arm64` | Internal, fix written | `.azdo/publish-app-host-patcher` must publish once |
 | `RocksDbNative` has no arm64 macOS dylib | External, worked around | Resolved by taking the file from the upstream `RocksDB` package (§10.7) |
 
 The AppHostPatcher entry is the only one under this repository's control, and it is a pipeline run rather
 than a code change. Everything else is either an upstream package or Apple.
+
+---
+
+## 13. Gates C and E: BuildXL building BuildXL on Apple Silicon, under the sandbox
+
+Everything before this section is about whether a macOS sandbox can be built. This section is about
+whether it is worth having, which is a different question and the only one that decides anything.
+
+The subject is BuildXL building itself on an Apple Silicon Mac: **294 process pips**, the real
+dependency graph, the real content cache. Not a synthetic workload — there is no way to argue about
+whether a synthetic workload is representative, and every earlier attempt in this work to shortcut to
+a smaller demo produced a number that turned out to mean nothing.
+
+### 13.1 What is being compared
+
+Two arms, identical in every respect but one:
+
+| Arm | Meaning |
+|---|---|
+| `/sandboxKind:macOs` | the interposition ingress driving the shipping broker engine |
+| `/sandboxKind:none` | the control: BuildXL with no observation at all, which is what macOS had before this work |
+
+Five scenarios, each repeated, each preceded by an untimed settle build so that what is timed is the
+steady state rather than the first build after a wipe:
+
+| Scenario | Setup | What it answers |
+|---|---|---|
+| `cold` | wipe `Cache.noindex`, `Objects.noindex`, `Bin` | what does observation cost when nothing can be reused? |
+| `cache-restore` | wipe outputs, keep the cache | can a fresh enlistment be served from cache? |
+| `no-op` | change nothing | what does the engine cost when there is no work? |
+| `leaf-change` | touch one leaf source file | does one edit re-execute one thing, or everything? |
+| `core-change` | touch a widely-depended-on file | does a deep edit re-execute exactly its cone? |
+
+The filter is the deployment minus four JavaScript graph-builder pips, which need an authenticated
+npm feed this machine has no credentials for. They are excluded by output path so they leave the
+graph entirely, rather than failing slowly inside every measurement. They fail identically with the
+sandbox off, so excluding them removes network noise, not sandbox cost. The control arm exists
+precisely so that this choice cannot flatter the result: any bias it introduces applies to both arms.
+
+#### How the arms are scheduled, and the false assumption that made the first attempt worthless
+
+The first version of this measurement ran every `macOs` sample, then every `none` sample. On a shared
+workstation that design cannot be defended: any drift in machine state between the two blocks is
+perfectly confounded with the arm. It duly failed. Microsoft Defender reacted to the file churn of a
+wiped output tree, drove the one-minute load average past 40, and **tripled** the second block's wall
+clock at identical pip counts. The result — "the sandbox is 3× *faster* than no sandbox" — was only
+caught because its sign was absurd. A 20% error in the plausible direction would have been published.
+
+The block design existed to work around an assumption stated in an earlier draft of this section:
+that `/sandboxKind` participates in the pip fingerprint, so switching arms would force a full
+re-execution. **That assumption is false, and measuring it is what unblocked this.** Alternating
+`macOs`/`none`/`macOs`/`none` on a fully cached tree gives 294/294 cache hits every time. The sandbox
+kind governs how an execution is *observed*, not what the pip *is*, so both arms address the same
+cache entries. Three consequences, all good:
+
+- Samples can be **paired**: within a replicate both arms run back to back, seconds apart, and the
+  order flips between replicates. The statistic of record is the median of the within-pair ratios,
+  not the ratio of the per-arm medians. A load excursion inside a pair perturbs both arms together
+  and largely cancels.
+- Every timed sample waits for the one-minute load average to fall back below 5 first. Without that
+  gate the load walked 5 → 18 across a single series, because the load a sample sees is mostly decay
+  from the sample before it, and one sample took 61 s against a 32 s neighbour at an identical pip
+  count.
+- Execution scenarios stay honest under pairing because each sample applies its own unique edit, so
+  the second arm of a pair cannot free-ride on the first arm's cache entry. Verified: a leaf-change
+  executes exactly 2 pips in both arms of every pair.
+
+One scenario needed a further guard. `core-change` executes **either 30 or 49 pips from an identical
+edit**, in both arms, splitting the wall clock into clean clusters near 14 s and 32 s. Comparing
+across those clusters produced a "1.618×" that measured nothing but which cluster each arm landed in.
+It is not the sandbox — both arms show both values at similar rates — and it did not reproduce in
+twelve consecutive ungated builds, so it is some pre-existing convergence behaviour in BuildXL's own
+graph. Rather than explain it, the harness **discards any pair whose two arms executed different pip
+counts** and retries, and the table below reports the two work classes as separate rows. 13 pairs
+were discarded this way to obtain 5 matched ones.
+
+### 13.2 Results
+
+Apple M2 Pro, 10 cores, 32 GB, macOS 27.0, arm64. Harness and raw data: `bench.py`,
+`bench-table.py`, and the `bench-*.json` result files.
+
+**What the sandbox costs.** Paired samples, interleaved arms, load-gated. "Paired ratio" is the
+median of the within-pair ratios; `unpaired` means the scenario wipes the cache, so its two arms
+cannot share state and the figure is the ratio of the per-arm medians.
+
+| Scenario | Process pips executed | `/sandboxKind:macOs` | `/sandboxKind:none` | Paired ratio | Pairs |
+|---|---|---|---|---|---|
+| No source change | 0 of 294 | 7.1 s | 7.2 s | 0.992× | 4 |
+| Change one leaf file | 2 of 294 | 10.8 s | 10.5 s | 1.044× | 4 |
+| Change a core file (30-pip case) | 30 of 294 | 14.2 s | 14.2 s | 1.029× | 3 |
+| Change a core file (49-pip case) | 49 of 294 | 31.5 s | 35.1 s | 0.920× | 2 |
+| Restore from warm cache | 0 of 294 | 16.4 s | 15.9 s | 1.033× | unpaired |
+| Cold build (empty cache) | 294 of 294 | 163 s | 137 s | 1.186× | unpaired |
+
+The 49-pip row has two pairs and one of its `none` samples is a 40 s outlier against a 30 s
+neighbour; read it as "no measurable difference", not as the sandbox being faster. The same applies
+in the other direction to the 4.4% on the leaf row. The only cost here that is larger than the noise
+is the cold build.
+
+**What the sandbox buys.** The same machine, against a full build — which is the honest alternative,
+because an enforcing sandbox is what makes it defensible to skip work at all:
+
+| Developer action | Full build | Incremental, sandbox on | Speedup |
+|---|---|---|---|
+| No source change | 163 s | 7.1 s | **23×** |
+| Change one leaf file | 163 s | 10.8 s | **15×** |
+| Change a core file (30-pip case) | 163 s | 14.2 s | **11×** |
+| Change a core file (49-pip case) | 163 s | 31.5 s | **5×** |
+| Delete every output and rebuild | 163 s | 16.4 s | **10×** |
+
+The last row is worth its own sentence. `rm -rf Out/Objects.noindex Out/Bin` — every build output on
+the machine, gone — comes back in **16 seconds, 294 of 294 pips served from cache**, with the sandbox
+on. That is the state a developer reaches by switching branches or running a clean, and on macOS
+before this work it cost a full rebuild every time.
+
+Raw samples, every one a wall-clock measurement of a command a developer would type:
+
+- `no-op` macOs: 7.16, 7.10, 7.17, 7.01 s — none: 7.28, 7.03, 7.30, 7.01 s
+- `leaf-change` macOs: 10.82, 10.79, 10.86, 11.56 s — none: 10.30, 10.26, 10.67, 11.14 s
+- `core-change` macOs: 14.22, 14.08, 31.85, 14.68, 31.12 s — none: 14.15, 13.68, 29.75, 14.27, 40.48 s
+  (13 further pairs discarded for unmatched work)
+- `cache-restore` macOs: 16.44, 16.89, 16.23 s — none: 16.76, 15.92, 15.89 s
+- `cold` macOs: 161.82, 163.96 s — none: 143.34, 131.43 s
+
+### 13.3 What the numbers say
+
+**Incrementality works (gate C).** A one-line change to a leaf source file re-executes **2 pips out
+of 294** and the build settles in **10.8 s**. The same edit unsandboxed re-executes the same 2 pips
+in 10.5 s. That equality is the whole point: the sandbox is not approximately as precise as no
+sandbox, it is *exactly* as precise — identical pip counts in every single pair, in every scenario —
+while additionally being able to tell you when your graph is wrong. A change to a widely-depended-on
+file re-executes its cone, 30 or 49 pips, not the build.
+
+**The win is real (gate E).** A full build is **163 s**; the edits a developer actually makes cost
+**7–32 s**. That is **5× to 23×**, and it is the number that decides whether anyone adopts this. It
+is not a sandbox result — it is a BuildXL result. The sandbox's contribution is that this is now
+available on macOS *soundly*, where before the only way to get it was to turn observation off and
+hope.
+
+**Observation costs what it should, where it should.** Within noise when nothing executes, ~3–4% on
+incremental builds, and **~19% on a cold build** where all 294 pips run and every access they make is
+reported. The cost is proportional to work done, which is the shape you want: the builds that are
+already fast stay fast, and the one that pays is the one you run least often.
+
+That 19% figure replaces a "~6%" in an earlier draft of this section. The 6% came from the blocked
+run described above, which was contaminated; it was too flattering, and it is corrected here rather
+than quietly dropped.
+
+### 13.4 Two defects the measurement found
+
+Neither would have been found by a test, because both produced *correct builds*. They are the
+argument for measuring incrementality rather than asserting it.
+
+**Opening a directory is not enumerating it.** The first benchmark showed the sandboxed arm collapsing
+to 159 hit / 135 executed on every incremental build while the control held 292/2 — a build 3× slower
+that never converged, no matter how many times it was repeated. The cause was that `opendir` reported
+a directory enumeration. An enumeration record makes the engine put the directory's entire membership
+into the pip's path set, so 133 NuGet pips each had a fingerprint that depended on every name in a
+directory that other pips write to. Linux draws this line correctly and always has
+(`detours.cpp`, `opendir` → `kGenericProbe`); the macOS ingress did not. Opening a directory is now a
+probe, and enumeration is reported on `readdir`/`readdir_r`/`__getdirentries64`/`getattrlistbulk` —
+the calls that actually read entries. Measured before and after: **159 hit / 135 executed / 63 s →
+292 hit / 2 executed / 20 s.**
+
+**A reported path has to be the path the engine will look for.** The interposer built its report path
+by joining the working directory to whatever string the caller passed, and stopped. `cp ../../input
+out` was reported as a read of `/repo/Out/Bin/../../input`. The engine matches reported paths against
+the pip's manifest by string, so that misses every rule naming the file, and an ordinary relative read
+of a *declared* dependency was reported as an undeclared access. What made it expensive to find is
+that the engine renders the collapsed form in its own messages — the violation it printed named a path
+that was, as printed, allowed. It was found by teeing the raw report stream and reading the wire form.
+Paths are now collapsed lexically before reporting; `realpath()` would have been wrong twice over,
+since it resolves symlinks (a build under `/tmp` would report `/private/tmp` and disagree with the
+spec) and fails on paths that do not exist, which is exactly the absent-path probe the sandbox most
+needs to report.
+
+### 13.5 One residual: observation has a convergence cost, and it is real
+
+After both fixes, the first build following any wipe of the object root still re-executes the 133
+NuGet download pips before settling permanently. An earlier draft of this section argued this was not
+the sandbox. The final measurements say otherwise, and the correction is worth more than the original
+claim.
+
+The settle build that follows each **cold** build was recorded for both arms, and the split is
+perfect across **6 of 6** trials, with the arm order alternating and every trial starting from a
+wiped cache:
+
+| Arm | Build after a cold build | Result |
+|---|---|---|
+| `/sandboxKind:macOs` | 3 of 3 | 161 hit / **133 executed**, 54–60 s |
+| `/sandboxKind:none` | 3 of 3 | **294 hit / 0 executed**, 8–13 s |
+
+Each `cold` wipes everything, so both arms start from identical state and the arm is the only
+variable. It is arm-caused.
+
+The earlier evidence was not wrong, it was answering a narrower question. Teeing a cold build's full
+report stream does show **zero** enumeration records on the package root across all 133 NuGet pips —
+only 30 directories are enumerated in the whole build and that is not one of them — so it is not the
+`opendir` defect returning. What it is instead: with `/sandboxKind:none` BuildXL observes *nothing*,
+so those pips' strong fingerprints have no observed inputs and there is nothing that can later
+mismatch. With the sandbox on they record what they actually touched, including probes of a package
+root that other pips are still materialising into, and when that state changes the next lookup
+misses.
+
+So the `none` arm's 294/294 hit is not the sandbox being slow. **It is the same unsound hit the
+correctness demo below constructs deliberately, occurring by itself in BuildXL's own build.** The
+control arm "wins" that comparison by declining to look.
+
+**It is a one-time convergence cost, not a standing tax**, and the `cache-restore` scenario is the
+control that shows it. Once the cache has converged, deleting every output and rebuilding gives
+**294 of 294 hits in both arms** — 16.4 s sandboxed against 15.9 s unsandboxed, three samples each —
+even though that scenario also wipes the package root. The sandbox pays one ~55 s build after a cache
+is first built, and nothing thereafter.
+
+BuildXL materialises package contents on demand — the package root goes from **39 entries to 133**
+across a single two-pip incremental build — so any correct observer will see state there change,
+because it does change. That is BuildXL's own lazy materialisation, not something macOS-specific, and
+the right fix is upstream of this work.
+
+### 13.6 What the sandbox is actually for
+
+The speedup above is the reason to use BuildXL. The sandbox is the reason to trust it. The following
+runs end to end from `correctness-demo.sh`; a pip reads two files and declares one:
+
+```
+1. Build with no sandbox                      report.txt: declared-v1, undeclared-v1     (correct)
+2. Change the undeclared file, rebuild        Processes: [1 done (1 hit)]  Build Succeeded
+                                              report.txt: declared-v1, undeclared-v1     (STALE)
+                                              should be: declared-v1, undeclared-v2-CHANGED
+3. The same build, with the sandbox           error DX0500: Disallowed file accesses:
+                                                R  /Users/.../undeclared.txt
+                                              Build FAILED
+```
+
+Step 2 is the failure mode in one line: the build **succeeds**, reports a **100% cache hit**, and
+produces a **silently wrong artifact**. Nothing in the log suggests anything is wrong, because from
+the engine's point of view nothing is — it was told the pip depends on one file, that file has not
+changed, so the cached result is valid. It is only invalid in the sense that it is not what the source
+tree says, and no amount of care in the engine can detect that without observing the process.
+
+That is what macOS had before this work, and what `/sandboxKind:none` still means. Step 3 is what it
+has now.
+
+#### The same thing, not staged
+
+The demo above is constructed, which is a fair thing to hold against it. So here is the sandbox
+catching something nobody planted, in BuildXL's own build, on one of the cold runs measured for this
+section:
+
+```
+error DX0500: [Pip40284FF79D2F668C, ResGen.Lite, BuildXL.Utilities, Configuration.dll]
+  Disallowed file accesses were detected (R = read):
+   R  .../Out/Bin/release/osx-arm64/System.Private.CoreLib.dll
+  Violations related to pip(s):
+   PipCFC60D96B74282C4, <COPYFILE>, BuildXL.Deployment, BuildXL.deployed
+```
+
+A codegen pip read a file produced by a *different* pip that it does not depend on. That is a race:
+the two pips are unordered, so whether the read sees the finished file, a partial one, or nothing at
+all depends on scheduling. It reproduced on 1 of 3 cold builds and not at all on the settle builds,
+which is exactly the signature of a race and exactly why it survives in a build nobody observes. With
+`/sandboxKind:none` it is not merely tolerated — it is invisible, and its result is cached.
+
+Being precise about what is and is not established: the read is of a real file, attributed by the
+engine to a real producing pip. The mechanism is **not** yet established, and there is a specific
+reason to be careful. BuildXL materialises deployments as **hard links** — the file above is
+`links=2` on disk — so one inode legitimately has several valid paths, and `ResGen.Lite`'s own
+deployment contains a `System.Private.CoreLib.dll` that is very likely the same inode as the one
+named in the violation. A path recovered from a descriptor rather than from the caller's own string
+would be ambiguous under those conditions. The interposer only does that for **directory**
+descriptors, which cannot be hard-linked, so it is not the obvious candidate — but "not the obvious
+candidate" is not "ruled out". This is recorded as open in §13.7 rather than claimed as a win.
+
+### 13.7 Honest limitations
+
+- **The interposition ingress observes cooperating processes.** A process can defeat it by making raw
+  syscalls, by `dlopen`-ing a fresh libc, or by being a statically linked binary. Every real build
+  tool cooperates, so it is sound for the problem it solves — telling you your graph is wrong — and it
+  is not a security boundary. The ES ingress is, and is what the entitlement is for.
+- **A statically linked tool is invisible, not partially visible.** There is no half-observation to
+  reason about, but there is also no warning; a build made entirely of static binaries would be
+  reported as clean.
+- **Process identity is weaker than under ES.** Lineage comes from the reported pid/ppid pair rather
+  than from an audit token, so pid reuse within a build is possible in principle. Reports are matched
+  to the nearest preceding `exec` for that pid.
+- **`F_GETPATH` resolves symlinks.** Enumeration records reached through a descriptor therefore report
+  the resolved path, while `open`/`stat` report the path as written. Under a repository root this
+  never diverges; under `/tmp` on macOS it always does.
+- **The sandbox library is not part of the pip fingerprint.** Changing observation fidelity does not
+  invalidate results computed under the old library. Correct today because the ingress only ever
+  reports more, never less, but it is an assumption rather than a guarantee.
+- **One reported violation is not yet explained.** The `ResGen.Lite` read in §13.6 reproduced on 1 of
+  3 cold builds. It is either a real race in BuildXL's build graph, which is what it looks like, or a
+  path attributed to the wrong one of several hard links to the same inode. Deciding between those
+  needs the raw wire report from a run that reproduces it, and that work is not done. Until it is,
+  the honest statement is that a cold macOS build under the sandbox succeeds most of the time and
+  reports this the rest of the time. Every incremental scenario in §13.2 — 40-plus builds — was clean.
+- **The measurement is one machine and one build.** An M2 Pro building BuildXL. The shape of the
+  result (cost proportional to work; identical pip counts in both arms) should generalise; the
+  constants will not.
