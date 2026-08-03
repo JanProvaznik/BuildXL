@@ -1206,19 +1206,37 @@ error DX0500: [Pip40284FF79D2F668C, ResGen.Lite, BuildXL.Utilities, Configuratio
 
 A codegen pip read a file produced by a *different* pip that it does not depend on. That is a race:
 the two pips are unordered, so whether the read sees the finished file, a partial one, or nothing at
-all depends on scheduling. It reproduced on 1 of 3 cold builds and not at all on the settle builds,
-which is exactly the signature of a race and exactly why it survives in a build nobody observes. With
-`/sandboxKind:none` it is not merely tolerated — it is invisible, and its result is cached.
+all depends on scheduling. It has reproduced once in nine cold builds and not at all on the settle
+builds, which is exactly the signature of a race and exactly why it survives in a build nobody
+observes. With `/sandboxKind:none` it is not merely tolerated — it is invisible, and its result is
+cached.
 
 Being precise about what is and is not established: the read is of a real file, attributed by the
-engine to a real producing pip. The mechanism is **not** yet established, and there is a specific
-reason to be careful. BuildXL materialises deployments as **hard links** — the file above is
-`links=2` on disk — so one inode legitimately has several valid paths, and `ResGen.Lite`'s own
-deployment contains a `System.Private.CoreLib.dll` that is very likely the same inode as the one
-named in the violation. A path recovered from a descriptor rather than from the caller's own string
-would be ambiguous under those conditions. The interposer only does that for **directory**
-descriptors, which cannot be hard-linked, so it is not the obvious candidate — but "not the obvious
-candidate" is not "ruled out". This is recorded as open in §13.7 rather than claimed as a win.
+engine to a real producing pip. The obvious way for that to be *wrong* is a hard link. BuildXL
+materialises deployments by hard-linking, and `ResGen.Lite`'s own deployment contains a
+`System.Private.CoreLib.dll` which is — verified with `stat` — **the same inode** as the file named in
+the violation, one of six links to it. If any layer recovered a path from a descriptor rather than
+using the caller's own string, it could name any of the six.
+
+That hypothesis has been tested rather than argued about, and it is **refuted**:
+
+- **The observer reports the path the caller passed.** `files/interpose-listen.py` is a standalone
+  listener for the wire protocol: it runs a program under `libBuildXLInterpose.dylib` with no broker
+  and no build, and prints every record. Against a two-link inode it reports `/tmp/hltest/alias.bin`
+  when the program opens the alias and `/tmp/hltest/real.bin` when it opens the other link. No
+  resolution happens.
+- **Nothing downstream canonicalises either.** The interposer is lexical on purpose (§7), the broker
+  never calls `realpath`, and BuildXL's managed report path has no identity-based reverse lookup.
+- **The tool does not read that path.** Running the shipped deployment under the listener produces 516
+  records and **zero** under `Out/Bin`. Independently, in a *successful* cold build with
+  `/logObservedFileAccesses+`, the same pip produced 502 access reports and **zero** under `Out/Bin`.
+- **It is not cross-pip attribution.** Each pip gets its own broker and its own socket, so a record
+  cannot arrive from another pip's process tree.
+
+So the violation is rare, real, and not manufactured by the observation layer — but the mechanism that
+produces it is still not established, and it is recorded as open in §13.7 rather than claimed as a win.
+The honest summary is that the sandbox reported something true and surprising about a build that has
+never been observed before, which is precisely what it is for.
 
 ### 13.7 Honest limitations
 
@@ -1238,12 +1256,13 @@ candidate" is not "ruled out". This is recorded as open in §13.7 rather than cl
 - **The sandbox library is not part of the pip fingerprint.** Changing observation fidelity does not
   invalidate results computed under the old library. Correct today because the ingress only ever
   reports more, never less, but it is an assumption rather than a guarantee.
-- **One reported violation is not yet explained.** The `ResGen.Lite` read in §13.6 reproduced on 1 of
-  3 cold builds. It is either a real race in BuildXL's build graph, which is what it looks like, or a
-  path attributed to the wrong one of several hard links to the same inode. Deciding between those
-  needs the raw wire report from a run that reproduces it, and that work is not done. Until it is,
-  the honest statement is that a cold macOS build under the sandbox succeeds most of the time and
-  reports this the rest of the time. Every incremental scenario in §13.2 — 40-plus builds — was clean.
+- **One reported violation is not yet explained.** The `ResGen.Lite` read in §13.6 has reproduced once
+  in nine cold builds. Four candidate explanations have been tested and eliminated — hard-link
+  ambiguity in the observer, canonicalisation anywhere in the chain, the tool genuinely reading the
+  path, and cross-pip report attribution — which narrows it but does not close it. Until a run that
+  reproduces is captured, the honest statement is that a cold macOS build under the sandbox succeeds
+  most of the time and reports this the rest of the time. Every incremental scenario in §13.2 —
+  40-plus builds — was clean.
 - **The measurement is one machine and one build.** An M2 Pro building BuildXL. The shape of the
   result (cost proportional to work; identical pip counts in both arms) should generalise; the
   constants will not.
