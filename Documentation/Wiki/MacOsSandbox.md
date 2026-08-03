@@ -1270,11 +1270,20 @@ find Public Private Shared -type f \( -name '*.cs' -o -name '*.dsc' -o -name '*.
 | No change at all | 0 / 294 | 7 s |
 | **6,284 source timestamps churned, contents identical** | **0 / 294** | **10–11 s** |
 
-Zero. Not "few" — the build is 294 cache hits out of 294, and the 3–4 s over a no-op build is the
-cost of re-hashing 6,284 files whose recorded identity no longer matches, which is the work that
-proves nothing changed. Against the 163 s cold build that is **16×**; against MSBuild's response to
-the same event it is the difference between rebuilding almost everything for nothing and rebuilding
-nothing.
+Zero. Not "few" — the build is 294 cache hits out of 294. And BuildXL did not simply fail to notice
+the touch; its own counters show it doing exactly the work the design says it should. Against a
+no-op build on the same tree:
+
+| `BuildXL.stats` counter | no-op | after churn |
+|---|---|---|
+| `LocalDiskContentStore.HashFileContentSizeBytes` | 249,257 | **36,700,570** |
+| `FileContentTable.NumHit` | 6,408 | 2,131 |
+
+The content table is keyed on file identity including the timestamp, so churning it costs a *rehash*
+— 35 MB of it, 147× a no-op — and the rehash then proves the content is unchanged, so nothing
+executes. That is the whole mechanism, and it is the 3–4 s difference between 7 s and 10–11 s.
+Against the 163 s cold build that is **16×**; against MSBuild's response to the same event it is the
+difference between rebuilding almost everything for nothing and rebuilding nothing.
 
 The sandbox is not a tax on this. Three replicates, arms interleaved and load-gated exactly as in
 §13.1: `macOs` 10 s and 11 s, `none` 12 s and 10 s. Indistinguishable, which is what §13.3 predicts —
