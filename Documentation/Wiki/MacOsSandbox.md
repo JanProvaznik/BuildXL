@@ -2,7 +2,9 @@
 
 Status: **implemented, self-verified, and measured end to end on a real build.** BuildXL builds
 itself on Apple Silicon under this sandbox — 294 process pips — and incremental builds are **5–23×**
-faster than a full build at 0–4% observation cost (§13). The Endpoint Security ingress, which is the
+faster than a full build at 0–4% observation cost (§13). Churning the timestamps of all 6,284 source
+files without changing a byte re-executes **zero** of the 294 pips, where MSBuild rebuilds 40 of 40
+projects for the same event (§13.7). The Endpoint Security ingress, which is the
 *enforcement-grade* observer, remains blocked on an Apple-issued entitlement; the interposition
 ingress that shares its engine does not need one, and is what the numbers above were measured
 through. This document records what was built, what has actually been proven, what has not, and what
@@ -188,7 +190,7 @@ the thing that ships.
 | Gate | Target | Status |
 |---|---|---|
 | **C. Incrementality precision** | a leaf change re-executes only what depends on it | **MET** — 292 hit / 2 executed, identical to the no-sandbox control |
-| **E. Real-build win** | measured speedup on a real build | **MET** — 5–23× against a full build, at 0–4% observation cost incrementally and 19% cold (§13) |
+| **E. Real-build win** | measured speedup on a real build | **MET** — 5–23× against a full build, at 0–4% observation cost incrementally and 19% cold; 0 of 294 pips re-executed on pure timestamp churn (§13) |
 
 The measurement is BuildXL building itself on Apple Silicon: 294 process pips, the real graph, the
 real cache. §13 has the numbers, the protocol, and the two defects the measurement found.
@@ -725,6 +727,10 @@ build, roughly 80% of a full build, entirely wasted. That is `git checkout`, a f
 CI agent. MSBuild compares timestamps and cannot do better; content-based caching can. That is the
 claim to make, and it is measured rather than asserted.
 
+Half of that comparison was still an assertion when this section was written: it measured what
+MSBuild wastes without measuring what replaces it. §13.7 closes it on the same machine — the same
+event against BuildXL's own 294-pip build under the sandbox re-executes **0** pips.
+
 
 ---
 
@@ -1206,7 +1212,7 @@ error DX0500: [Pip40284FF79D2F668C, ResGen.Lite, BuildXL.Utilities, Configuratio
 
 A codegen pip read a file produced by a *different* pip that it does not depend on. That is a race:
 the two pips are unordered, so whether the read sees the finished file, a partial one, or nothing at
-all depends on scheduling. It has reproduced once in nine cold builds and not at all on the settle
+all depends on scheduling. It has reproduced once in fourteen cold builds and not at all on the settle
 builds, which is exactly the signature of a race and exactly why it survives in a build nobody
 observes. With `/sandboxKind:none` it is not merely tolerated — it is invisible, and its result is
 cached.
@@ -1235,11 +1241,56 @@ That hypothesis has been tested rather than argued about, and it is **refuted**:
   cannot arrive from another pip's process tree.
 
 So the violation is rare, real, and not manufactured by the observation layer — but the mechanism that
-produces it is still not established, and it is recorded as open in §13.7 rather than claimed as a win.
+produces it is still not established, and it is recorded as open in §13.8 rather than claimed as a win.
 The honest summary is that the sandbox reported something true and surprising about a build that has
 never been observed before, which is precisely what it is for.
 
-### 13.7 Honest limitations
+### 13.7 The scenario that actually happens: `git checkout`
+
+Every number in §13.2 is an *edit* scenario, which is the case a developer notices. The case that
+costs the most in aggregate is the one nobody notices, and §11 already measured it on the MSBuild
+side: when file contents are identical but timestamps have moved, MSBuild rebuilds **40 of 40**
+projects and produces **40 of 40 byte-identical outputs** — 12.65 s against a 15.72 s cold build,
+about 80% of a full build, entirely wasted. That is `git checkout`, `git clean`, a fresh clone, and
+every CI agent that starts from an empty workspace.
+
+§11 measured the waste but never measured the alternative on the same machine, which left the
+interesting half of the comparison as an assertion. Here it is, on the same 294-pip build of BuildXL
+itself, under the sandbox:
+
+```bash
+find Public Private Shared -type f \( -name '*.cs' -o -name '*.dsc' -o -name '*.c' \
+    -o -name '*.cpp' -o -name '*.h' -o -name '*.resx' \) -exec touch {} +   # 6,284 files
+./bxl.sh --use-dev --release /q:ReleaseDotNetCoreMacArm64 <filter> /sandboxKind:macOs
+```
+
+| | pips executed | wall clock |
+|---|---|---|
+| Cold build | 294 / 294 | 163 s |
+| No change at all | 0 / 294 | 7 s |
+| **6,284 source timestamps churned, contents identical** | **0 / 294** | **10–11 s** |
+
+Zero. Not "few" — the build is 294 cache hits out of 294, and the 3–4 s over a no-op build is the
+cost of re-hashing 6,284 files whose recorded identity no longer matches, which is the work that
+proves nothing changed. Against the 163 s cold build that is **16×**; against MSBuild's response to
+the same event it is the difference between rebuilding almost everything for nothing and rebuilding
+nothing.
+
+The sandbox is not a tax on this. Three replicates, arms interleaved and load-gated exactly as in
+§13.1: `macOs` 10 s and 11 s, `none` 12 s and 10 s. Indistinguishable, which is what §13.3 predicts —
+there is no execution to observe.
+
+Two caveats, because this is the strongest number in the document:
+
+- **The first build after switching arms is not this.** One replicate recorded 73 s and 160/294 hits,
+  and that is the §13.5 convergence cost, not the churn. It appears once and then does not recur.
+- **6,284 files is a worse case than `git checkout`.** Touching every source file at once provokes an
+  indexing storm from Spotlight and Defender that has nothing to do with BuildXL — ungated, the same
+  measurement produced 27 and 73 s and, twice, over 1,000 s. Every number above was taken after the
+  machine returned to `loadavg < 4`. This is the same contamination §13.1 was rewritten to defend
+  against, and it is worth recording that it reappeared the moment a new scenario was added.
+
+### 13.8 Honest limitations
 
 - **The interposition ingress observes cooperating processes.** A process can defeat it by making raw
   syscalls, by `dlopen`-ing a fresh libc, or by being a statically linked binary. Every real build
@@ -1258,7 +1309,7 @@ never been observed before, which is precisely what it is for.
   invalidate results computed under the old library. Correct today because the ingress only ever
   reports more, never less, but it is an assumption rather than a guarantee.
 - **One reported violation is not yet explained.** The `ResGen.Lite` read in §13.6 has reproduced once
-  in nine cold builds. Four candidate explanations have been tested and eliminated — hard-link
+  in fourteen cold builds. Four candidate explanations have been tested and eliminated — hard-link
   ambiguity in the observer, canonicalisation anywhere in the chain, the tool genuinely reading the
   path, and cross-pip report attribution — which narrows it but does not close it. Until a run that
   reproduces is captured, the honest statement is that a cold macOS build under the sandbox succeeds
