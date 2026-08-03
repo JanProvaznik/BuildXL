@@ -1285,10 +1285,11 @@ Two caveats, because this is the strongest number in the document:
 - **The first build after switching arms is not this.** One replicate recorded 73 s and 160/294 hits,
   and that is the §13.5 convergence cost, not the churn. It appears once and then does not recur.
 - **6,284 files is a worse case than `git checkout`.** Touching every source file at once provokes an
-  indexing storm from Spotlight and Defender that has nothing to do with BuildXL — ungated, the same
-  measurement produced 27 and 73 s and, twice, over 1,000 s. Every number above was taken after the
-  machine returned to `loadavg < 4`. This is the same contamination §13.1 was rewritten to defend
-  against, and it is worth recording that it reappeared the moment a new scenario was added.
+  indexing storm from Spotlight and Defender that has nothing to do with BuildXL — the same
+  measurement, ungated, produced 1588 s, 27 s, 13 s and 1070 s on four consecutive runs that all
+  reported 294 cache hits out of 294. Every number above was taken after the machine returned to
+  `loadavg < 4`. This is the same contamination §13.1 was rewritten to defend against, and it is
+  worth recording that it reappeared the moment a new scenario was added.
 
 ### 13.8 Honest limitations
 
