@@ -1328,3 +1328,206 @@ Two caveats, because this is the strongest number in the document:
 - **The measurement is one machine and one build.** An M2 Pro building BuildXL. The shape of the
   result (cost proportional to work; identical pip counts in both arms) should generalise; the
   constants will not.
+
+## 14. Generalisation: a real MSBuild graph, not BuildXL's own
+
+Everything in §13 measures BuildXL building BuildXL. That is a real build, but it is a DScript build,
+and DScript is BuildXL's own language. The obvious objection is that the result says more about the
+codebase than about the platform. §14 answers it by running the **MsBuild resolver** on macOS — a
+frontend that consumes ordinary `.csproj` files, the format the rest of the world actually uses.
+
+Getting there required fixing five defects. None of them was in the sandbox.
+
+### 14.1 The MsBuild resolver had three independent Windows gates
+
+Each failed with a symptom that pointed somewhere else.
+
+| Gate | Symptom | Actual cause |
+|---|---|---|
+| `#if PLATFORM_WIN` around the `using`, the ETW registration and the `AddFrontEnd` call in `FrontEndControllerFactory` | `DX11200: Resolver kind 'MsBuild' is not registered` | Reads like a missing assembly. The assembly was in the deployment; it was never registered |
+| `GenerateFileAccessManifest` passing `GetFolderPath(Windows\|InternetCache\|History)` to `AbsolutePath.Create` | `ContractException: Invalid path ''`, engine dead in `PopulateGraph` | Off Windows those three return `""`, and `AbsolutePath.Create` **asserts** on the empty string. `WindowsOsDefaults.GetSpecialFolder` guards this with `TryCreate`; this was a hand-rolled copy that did not |
+| `MsBuildRuntime` has no default, and `ShouldRunDotNetCoreMSBuild()` required it to be explicitly `"DotNetCore"` | `cannot launch .../MsBuildGraphBuilder/net472/ProjectGraphBuilder.exe: No such file or directory` | The resolver selected the net472 graph construction tool, which is deliberately not deployed off Windows. The dotnetcore one was present all along |
+
+The deployment gate in `BuildXL.FrontEnd.Factory.dsc` had been removed in an earlier round, which is
+why the first symptom was so confusing: the binary was there and the resolver still did not exist.
+
+**Method note.** Three gates in series, each one hiding the next, is the normal shape of a
+"platform support" change. The first fix produced a *different* error, which felt like progress and
+was — but a plan that had budgeted one fix would have been wrong three times over.
+
+### 14.2 Graph construction did not hang, it was hashing the operating system
+
+After the gates, `bxl` sat at 167% CPU for ten minutes with no output after "Done constructing build
+graph". `sample` was useless — JIT frames come back as `???`. `dotnet-stack report -p <pid>` gave the
+answer immediately:
+
+```
+MsBuildWorkspaceResolver.ComputeBuildGraphAsync
+  -> TrackFilesAndEnvironment
+    -> FrontEndUtilities.TrackToolFileAccesses
+      -> FrontEndEngineImplementation.RecordFrontEndFile
+        -> InputTracker.RegisterFileAccess
+          -> GetAndRecordContentHashAsync(...).GetAwaiter().GetResult()
+```
+
+Two independent problems, both fixed:
+
+- **The manifest untracked nothing.** Because the hand-rolled special-folder list had been the only
+  untracked scope, `/usr`, `/bin`, `/private`, `/var`, `/etc`, `/dev`, `/lib` and `/System` were all
+  tracked. Every access the graph-construction sandbox reported was then opened and hashed. Switching
+  to `BuildXL.Pips.Graph.OsDefaults` — the same source `GenerateToolFileAccessManifest` already uses
+  for the JavaScript and Ninja resolvers — fixed it by construction.
+- **`TrackToolFileAccesses` hashed each path once per distinct access record.**
+  `SandboxedProcessReports.FileAccesses` is a `HashSet<ReportedFileAccess>`, deduplicated on the whole
+  record — operation, flags, error code — not on the path. Measured with the tracer shipped at
+  `Public/Src/Sandbox/MacOs/Interpose/interpose-trace.py`, a hello-world restore produced **7,063
+  access records over 839 distinct paths: 8.4x amplification**. `TrackDirectory`, `FileExists` and
+  `RecordFrontEndFile` are all idempotent, so collapsing to one entry per path with the union of the
+  flags is free.
+
+Result: no output in ten minutes → **7 seconds**.
+
+### 14.3 `/tmp` was untracked as a path but not as a scope
+
+MSBuild pips then failed with `DX0500` on
+`/tmp/.dotnet/lockfiles/global/<hash>.{client,server}` and the matching `shm` entries.
+
+`UnixDefaults` listed `/tmp` in `UntrackedFiles` but not in `UntrackedDirectories`. `/etc` is
+deliberately in **both** lists, with the comment "could be a folder or a directory symlink, hence
+should be untracked as both a path and a scope". `/tmp` had simply been missed. Two independent
+reasons it matters:
+
+- On macOS `/tmp` is a symlink to `/private/tmp`. Untracking `/private` only covers accesses reported
+  through the *resolved* path, and a sandbox ingress reports the lexical path the process used.
+- Regardless of the symlink, the .NET runtime puts its cross-process named-mutex state under
+  `/tmp/.dotnet/{lockfiles,shm}/global` **regardless of `TMPDIR`**, because that namespace is global
+  by definition. Every `dotnet` child process in a build writes there.
+
+The interesting part is the second-order effect. A pip with a disallowed access is not just failed —
+it is **never stored in the cache**. The visible symptom was not "the build fails"; it was "the build
+never gets a cache hit", with `MissForDescriptorsDueToStrongFingerprints` and an `Old` strong
+fingerprint that never changed across runs. Cache-miss analysis (`/cacheMiss+`) named the paths;
+the DFA that explained *why* they never converged was three lines further down the same log.
+
+### 14.4 The failure that only appears once something actually compiles
+
+With the above fixed, a 24-project graph reported **Build Succeeded, 24 pips, 22 s**. That result was
+worthless. MSBuild had found every project up to date from a previous `dotnet build` and compiled
+nothing. Once the outputs were scrubbed, all 24 pips failed:
+
+```
+MSBUILD : error MSB4017: The build stopped unexpectedly because of an unexpected logger failure.
+  ---> System.InvalidOperationException: Failed at reporting augmented file accesses for the
+       following files: [ ... 160 reference assemblies ... ]
+```
+
+This is the **shared compilation** design. `VBCSCompiler`, the Roslyn compiler server, is allowed to
+break away from the sandbox; `VBCSCompilerLogger` compensates by reporting the compiler's inputs and
+outputs on its behalf. That reporting needs an *augmented manifest* channel — and only Detours has
+one. `AugmentedManifestReporter` writes to the handle published in
+`BUILDXL_AUGMENTED_MANIFEST_HANDLE`, and **nothing sets that variable off Windows**. The Linux sandbox
+implements breakaway but no augmented reporting either, so this is a Unix-wide gap, not a macOS one.
+
+Off Windows, shared compilation now defaults to off. That is also the more conservative choice: the
+compiler runs as an ordinary child process and the sandbox observes it directly instead of trusting a
+logger's reconstruction of what it did.
+
+**Method note.** "Build Succeeded" is not evidence that a build built anything. The 22 s result had a
+plausible wall clock, the expected pip count and a green verdict, and was pure measurement of MSBuild
+deciding to do nothing. The check that caught it was mechanical: edit a string literal, then search the
+produced DLL for its UTF-16LE bytes. (`strings -e l` does *not* find these; it was tried first and
+silently returned nothing, which would have produced a second wrong conclusion.)
+
+### 14.5 The benchmark, and what it says
+
+60 projects in 6 layers, each depending on 3 projects in the layer below, 40 source files each —
+**2,460 source files**. Wide rather than linear, because a linear chain gives BuildXL no parallelism
+and is not what real repositories look like. Both arms build the same tree from the same sources;
+BuildXL runs `/sandboxKind:macOs`. Load-gated at `loadavg < 4`, interleaved, 3 reps, medians.
+Same machine as §13: M2 Pro, 10 cores, macOS 27.0, arm64.
+
+| Scenario | BuildXL + macOS sandbox | `dotnet build` | ratio |
+|---|---|---|---|
+| Cold | 66 s | 19 s | 0.29x |
+| No change | 8.8 s (58/58 hit) | 3.0 s | 0.34x |
+| **6,000 timestamps churned, contents identical** | **7.2 s (58/58 hit)** | **33.0 s** | **4.6x** |
+| Revert to an already-built state | 6.5 s (58/58 hit) | 11.3 s | 1.7x |
+| Public API change in a layer-0 project | 56.6 s (13/58 hit) | 24.9 s | 0.44x |
+| Method-body change in a layer-0 project | 52.6 s (13/58 hit) | 4.4 s | 0.08x |
+
+Reported as measured, including the rows where BuildXL loses badly. Three things explain them.
+
+**1. Almost the entire cold-build gap is the compiler server, not the sandbox.** The decisive control
+is to take the compiler server away from MSBuild too:
+
+| Cold build of the same 60-project graph | wall clock |
+|---|---|
+| `dotnet build`, compiler server on (default) | **10.2 s** |
+| `dotnet build`, `-p:UseSharedCompilation=false` | **60.0 s** |
+| BuildXL, macOS sandbox (compiler server unavailable, §14.4) | **66 s** |
+
+66 s against a 60.0 s like-for-like baseline is **1.10x** — the same order as the 1.19x cold-build
+overhead measured independently in §13. The 3.4x that the naive comparison shows is 6x of missing
+compiler server and 1.1x of sandbox. This single number is the most useful result in §14: it converts
+"BuildXL is slow on macOS" into "one specific feature is missing, here is what it costs".
+
+**2. Project-granular caching is strictly coarser than reference-assembly incrementality.** A
+method-body change does not alter `L0P0`'s public surface, so MSBuild's ref-assembly check skips all
+45 downstream projects and rebuilds exactly one. BuildXL's pips consume the real DLL, whose content
+did change, so all 45 re-execute. This is a genuine design trade, not a macOS defect, and it is the
+price of the property that makes the cache shareable at all.
+
+**3. The wins are exactly where MSBuild's incrementality collapses.** Timestamp churn is `git
+checkout`, `git clean`, a fresh clone, and every CI agent that starts from an empty workspace: MSBuild
+rebuilds all 60 projects to produce byte-identical outputs, BuildXL executes nothing. "Revert to an
+already-built state" is undoing a change or moving back to `main`.
+
+### 14.6 The gap that stops this being a CI story on macOS today
+
+The obvious next scenario — build in one workspace, then get cache hits in a *different* workspace,
+which is what a CI agent or a second developer is — **does not work on macOS or Linux**. Measured, not
+assumed: a pristine copy of the same sources pointed at the same `/cacheDirectory` got **0 of 58 hits**.
+
+Fingerprints embed absolute paths. Windows solves this with `/RunInSubst`, which maps the repository
+root to a drive letter; its own help text says "Only effective on Windows, in other platforms the
+option is ignored". Two workarounds were tried and both failed:
+
+- **`/substSource` + `/substTarget`** only rewrite log messages. The help text says so; the
+  fingerprints are untouched.
+- **A symlink at a canonical path** fails because the *tools* canonicalise, not BuildXL. Invoking
+  `bxl /c:$HOME/bxlwork/config.dsc` did root the pip graph at `$HOME/bxlwork` — and then every pip
+  failed `DX0500` writing to `/Users/janpro/wide-bxl/...`, because MSBuild resolved the symlink and
+  wrote through the real path while BuildXL had declared outputs under the link. (Invoking it via
+  `cd` does not even get that far: `getcwd()` returns the physical path.)
+
+So the honest scope of §14's result is *one machine, across time* — which is the developer
+inner-loop case, and is real — but not yet *across machines*, which is the CI and dev-cache case.
+Closing it needs source-root tokenisation in the fingerprint rather than a drive-letter subst, and
+that would benefit Linux equally.
+
+### 14.7 What this adds to §13, and what it does not
+
+Adds:
+
+- The sandbox is not the bottleneck for a non-DScript build either: **1.10x** on a cold 60-project
+  MSBuild graph, measured against a like-for-like baseline, consistent with §13's 1.19x.
+- The timestamp-churn result reproduces on a completely different frontend and codebase:
+  **4.6x** here, 16x in §13. Different constant, same shape, and it is the scenario §11 had measured
+  MSBuild losing 40 of 40 projects to.
+- Five real defects fixed, all of them platform gates or Windows-only assumptions, none in the
+  sandbox.
+
+Does not add:
+
+- Any claim that BuildXL is faster than `dotnet build` for a developer editing one file in a warm
+  tree on one machine. On this graph it is not, and §14.5 explains exactly why.
+- Any cross-machine result. §14.6 is a blocker, not an omission.
+
+### 14.8 Ranked follow-ups
+
+| # | Item | Why it is ranked here |
+|---|---|---|
+| 1 | **Augmented manifest ingress for the Unix sandboxes** | Worth 6x on cold MSBuild builds (§14.5). Needs a transport for `AugmentedManifestReporter` off Windows plus breakaway for a `dotnet`-hosted `VBCSCompiler`, which cannot be matched by process name |
+| 2 | **Source-root tokenisation in fingerprints** | Unblocks cross-workspace and cross-machine caching on macOS *and* Linux (§14.6). This is the CI story |
+| 3 | Reference-assembly awareness for MSBuild pips | Would close the method-body-change row (§14.5). Large change; the trade is deliberate today |
+| 4 | The `ResGen.Lite` `DX0500` in §13.6 | Still one occurrence in fourteen cold builds, still unexplained |
