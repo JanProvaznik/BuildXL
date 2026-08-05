@@ -152,8 +152,13 @@ namespace BuildXL.Utilities.Configuration
         /// </summary>
         /// <remarks>
         /// Keep in sync with Public\Sdk\Public\Prelude\Prelude.Configuration.Resolvers.dsc
-        /// If not specified, the default is full framework, so this function returns false in that case.
+        /// If not specified, the default is full framework on Windows. Off Windows there is no full
+        /// framework MSBuild to default to, and the net472 graph construction tool is deliberately not
+        /// deployed there, so an unset runtime means DotNetCore rather than a tool that cannot exist.
+        /// An explicit "FullFramework" is still honoured, so the failure stays the user's to see.
         /// </remarks>
-        public static bool ShouldRunDotNetCoreMSBuild(this IMsBuildResolverSettings msBuildResolverSettings) => msBuildResolverSettings.MsBuildRuntime == "DotNetCore";
+        public static bool ShouldRunDotNetCoreMSBuild(this IMsBuildResolverSettings msBuildResolverSettings)
+            => msBuildResolverSettings.MsBuildRuntime == "DotNetCore"
+               || (string.IsNullOrEmpty(msBuildResolverSettings.MsBuildRuntime) && !OperatingSystemHelper.IsWindowsOS);
     }
 }

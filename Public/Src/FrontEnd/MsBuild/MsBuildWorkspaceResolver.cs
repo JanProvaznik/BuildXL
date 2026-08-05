@@ -537,20 +537,28 @@ namespace BuildXL.FrontEnd.MsBuild
                 MonitorChildProcesses = true,
             };
 
-            fileAccessManifest.AddScope(
-                AbsolutePath.Create(Context.PathTable, SpecialFolderUtilities.GetFolderPath(Environment.SpecialFolder.Windows)),
-                FileAccessPolicy.MaskAll,
-                FileAccessPolicy.AllowAllButSymlinkCreation);
+            // This used to hand-roll three Windows special folders (Windows, InternetCache, History) and pass
+            // them straight to AbsolutePath.Create. Off Windows GetFolderPath returns the empty string for all
+            // three and AbsolutePath.Create asserts on it, so the engine died before the graph was built.
+            // OsDefaults is the same set on Windows (plus Defender), is the right set on Unix, and already
+            // drops folders the platform does not have. It is also what every other out-of-proc frontend tool
+            // uses: see FrontEndUtilities.GenerateToolFileAccessManifest.
+            // Untracking the OS directories is not just about the crash. Every access we do report is later
+            // opened and hashed by TrackToolFileAccesses, so leaving /usr, /bin, /System and friends tracked
+            // makes graph construction pay for the whole operating system.
+            BuildXL.Pips.Graph.OsDefaults osDefaults = OperatingSystemHelper.IsWindowsOS
+                ? new BuildXL.Pips.Graph.PipGraph.WindowsOsDefaults(Context.PathTable)
+                : new BuildXL.Pips.Graph.PipGraph.UnixDefaults(Context.PathTable, pipGraph: null);
 
-            fileAccessManifest.AddScope(
-                AbsolutePath.Create(Context.PathTable, SpecialFolderUtilities.GetFolderPath(Environment.SpecialFolder.InternetCache)),
-                FileAccessPolicy.MaskAll,
-                FileAccessPolicy.AllowAllButSymlinkCreation);
+            foreach (var untrackedDirectory in osDefaults.UntrackedDirectories)
+            {
+                fileAccessManifest.AddScope(untrackedDirectory.Path, FileAccessPolicy.MaskAll, FileAccessPolicy.AllowAllButSymlinkCreation);
+            }
 
-            fileAccessManifest.AddScope(
-                AbsolutePath.Create(Context.PathTable, SpecialFolderUtilities.GetFolderPath(Environment.SpecialFolder.History)),
-                FileAccessPolicy.MaskAll,
-                FileAccessPolicy.AllowAllButSymlinkCreation);
+            foreach (var untrackedFile in osDefaults.UntrackedFiles)
+            {
+                fileAccessManifest.AddPath(untrackedFile.Path, FileAccessPolicy.MaskAll, FileAccessPolicy.AllowAllButSymlinkCreation);
+            }
 
             fileAccessManifest.AddScope(toolDirectory, FileAccessPolicy.MaskAll, FileAccessPolicy.AllowReadAlways);
             fileAccessManifest.AddPath(outputFile, FileAccessPolicy.MaskAll, FileAccessPolicy.AllowWrite);

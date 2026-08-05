@@ -14,9 +14,7 @@ using BuildXL.FrontEnd.Yarn;
 using BuildXL.FrontEnd.Lage;
 using BuildXL.FrontEnd.Ninja;
 using BuildXL.FrontEnd.Nx;
-#if PLATFORM_WIN
 using BuildXL.FrontEnd.MsBuild;
-#endif
 using BuildXL.FrontEnd.Nuget;
 using BuildXL.FrontEnd.Script;
 using BuildXL.FrontEnd.Script.Debugger;
@@ -73,9 +71,7 @@ namespace BuildXL.FrontEnd.Factory
                 global::BuildXL.FrontEnd.Yarn.ETWLogger.Log,
                 global::BuildXL.FrontEnd.Ninja.ETWLogger.Log,
                 global::BuildXL.FrontEnd.Nx.ETWLogger.Log,
-#if PLATFORM_WIN
-                global::BuildXL.FrontEnd.MsBuild.ETWLogger.Log,             
-#endif
+                global::BuildXL.FrontEnd.MsBuild.ETWLogger.Log,
             };
 
         /// <nodoc />
@@ -286,9 +282,12 @@ namespace BuildXL.FrontEnd.Factory
             frontEndFactory.AddFrontEnd(new NinjaFrontEnd());
             frontEndFactory.AddFrontEnd(new NxFrontEnd());
 
-#if PLATFORM_WIN
+            // The MSBuild resolver drives MSBuild as the pip's tool, and MSBuild runs anywhere .NET
+            // does. The resolver already knows how to launch the dotnet-core one
+            // (msBuildRuntime: "DotNetCore"); this registration was the last thing keeping it from
+            // being reachable off Windows, and it was gated at build time so the failure surfaced as
+            // "Resolver kind 'MsBuild' is not registered" with the assembly sitting in the deployment.
             frontEndFactory.AddFrontEnd(new MsBuildFrontEnd());
-#endif
 
             if (!frontEndFactory.TrySeal(loggingContext))
             {
