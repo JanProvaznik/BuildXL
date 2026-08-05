@@ -124,6 +124,15 @@ namespace BuildXL.Pips.Graph
                         UnixPaths.Run,
                         UnixPaths.UsrLocalInclude,
                         UnixPaths.UsrLinuxGnu,
+                        // /tmp is already untracked above as a path; it must also be untracked as a scope.
+                        // On macOS /tmp is a symlink to /private/tmp: untracking /private only covers accesses
+                        // that were reported through the resolved path, and sandbox ingresses report the
+                        // lexical path the process actually used. Independently of the symlink, the .NET runtime
+                        // places its cross-process named-mutex state (lockfiles/ and shm/) under /tmp/.dotnet/<ns>
+                        // for the *global* namespace regardless of TMPDIR, so every `dotnet` child process in a
+                        // build writes there. Without this scope those writes surface as undeclared writes (DX0500),
+                        // which fails the pip and - more insidiously - makes it uncacheable.
+                        UnixPaths.TmpDir,
                     }
                     .Concat(IfMacOs(
                         MacPaths.AppleInternal,
