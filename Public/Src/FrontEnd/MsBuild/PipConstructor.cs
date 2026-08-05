@@ -81,7 +81,25 @@ namespace BuildXL.FrontEnd.MsBuild
         // TODO: it would be better if MSBuild provided the property name
         internal const string s_isGraphBuildProperty = "IsGraphBuild";
 
-        private bool UseSharedCompilation => m_resolverSettings.UseManagedSharedCompilation != false;
+        /// <summary>
+        /// Whether to let VBCSCompiler (the Roslyn compiler server) break away from the sandbox and have
+        /// <see cref="VBCSCompilerLogger"/> report its accesses on its behalf.
+        /// </summary>
+        /// <remarks>
+        /// This requires two distinct sandbox capabilities: process breakaway, and an *augmented manifest*
+        /// channel for the logger to report the compiler's inputs and outputs through. Only Detours provides
+        /// the latter - <c>AugmentedManifestReporter</c> writes to the handle Detours publishes in
+        /// BUILDXL_AUGMENTED_MANIFEST_HANDLE, and nothing sets that variable off Windows. With no channel the
+        /// logger throws InvalidOperationException("Failed at reporting augmented file accesses..."), which
+        /// surfaces as MSB4017 and fails every pip that actually invokes the compiler. Note this is silent
+        /// until compilation really happens: a project MSBuild considers up to date never reaches the logger.
+        /// So off Windows this defaults to off, which is also the more conservative choice - the compiler then
+        /// runs as an ordinary child process and the sandbox observes its accesses directly rather than
+        /// trusting a logger's reconstruction of them. An explicit opt-in is still honored.
+        /// </remarks>
+        private bool UseSharedCompilation => OperatingSystemHelper.IsWindowsOS
+            ? m_resolverSettings.UseManagedSharedCompilation != false
+            : m_resolverSettings.UseManagedSharedCompilation == true;
 
         /// <nodoc/>
         public PipConstructor(
