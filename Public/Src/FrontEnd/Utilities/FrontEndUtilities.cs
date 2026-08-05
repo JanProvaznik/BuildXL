@@ -304,6 +304,13 @@ namespace BuildXL.FrontEnd.Utilities
         {
             // Compute all parseable paths
             // TODO: does it make sense to consider enumerations, or as a result the graph will be too unstable? Does it matter for MsBuild graph construction?
+
+            // A tool reports the same path many times over, once per distinct access record: a hello-world MSBuild
+            // restore produces ~7000 records over ~840 paths. Each Read below opens and hashes the file, so acting
+            // per record rather than per path multiplies graph construction by that ratio. Collapsing to distinct
+            // paths first is free of semantics: TrackDirectory, FileExists and RecordFrontEndFile are all
+            // idempotent, so doing each once with the union of the requested access flags is the same work.
+            var accessByPath = new Dictionary<AbsolutePath, RequestedAccess>();
             foreach (var access in fileAccesses)
             {
                 string accessPath = access.GetPath(context.PathTable);
@@ -316,25 +323,35 @@ namespace BuildXL.FrontEnd.Utilities
                         continue;
                     }
 
-                    if ((access.RequestedAccess & RequestedAccess.Enumerate) != 0)
+                    accessByPath[path] = accessByPath.TryGetValue(path, out var existing)
+                        ? existing | access.RequestedAccess
+                        : access.RequestedAccess;
+                }
+            }
+
+            foreach (var kvp in accessByPath)
+            {
+                AbsolutePath path = kvp.Key;
+                RequestedAccess requestedAccess = kvp.Value;
+
+                if ((requestedAccess & RequestedAccess.Enumerate) != 0)
+                {
+                    engine.TrackDirectory(path.ToString(context.PathTable));
+                }
+                if ((requestedAccess & RequestedAccess.Probe) != 0)
+                {
+                    engine.FileExists(path);
+                }
+                if ((requestedAccess & RequestedAccess.Read) != 0)
+                {
+                    // Two things are happening here: we want to register if the file is present or absent. Engine.FileExists takes
+                    // care of that. And in the case the file exists, record the content.
+                    // There are apparently some repos that create and delete files during graph construction :(
+                    // So we cannot trust detours and check for IsNonexistent on the access itself. Even though there were read/write accesses on a given file,
+                    // the file may not exist at this point
+                    if (engine.FileExists(path))
                     {
-                        engine.TrackDirectory(path.ToString(context.PathTable));
-                    }
-                    if ((access.RequestedAccess & RequestedAccess.Probe) != 0)
-                    {
-                        engine.FileExists(path);
-                    }
-                    if ((access.RequestedAccess & RequestedAccess.Read) != 0)
-                    {
-                        // Two things are happening here: we want to register if the file is present or absent. Engine.FileExists takes
-                        // care of that. And in the case the file exists, record the content.
-                        // There are apparently some repos that create and delete files during graph construction :(
-                        // So we cannot trust detours and check for IsNonexistent on the access itself. Even though there were read/write accesses on a given file,
-                        // the file may not exist at this point
-                        if (engine.FileExists(path))
-                        {
-                            engine.RecordFrontEndFile(path, frontEndName);
-                        }
+                        engine.RecordFrontEndFile(path, frontEndName);
                     }
                 }
             }
