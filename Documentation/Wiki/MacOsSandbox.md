@@ -1684,6 +1684,22 @@ Measured after the change, with no workaround in the demo tree:
 | Weak-fingerprint generations in the shared cache for 58 pips | 3 | **1** |
 | Fresh volume, empty L1, shared L2 | intermittent | 58/58, 6–10 s |
 
+The obvious objection is that the RAR state file exists for a reason and removing it should cost
+something. Measured, paired and interleaved, forcing all 58 pips to execute in both arms by swapping
+the resolver assembly between runs:
+
+| rep | suppressed (new default) | enabled (old behaviour) |
+|---|---|---|
+| 1 | 77 s | 91 s |
+| 2 | 74 s | 70 s |
+| 3 | 64 s | 65 s |
+| **median** | **74 s** | **70 s** |
+
+The spread *within* each arm (64–77 s and 65–91 s) is larger than the difference *between* them, so at
+this sample size there is no resolvable cost. That is the expected result rather than a lucky one:
+BuildXL runs each project as a one-shot isolated pip, so a state file written to accelerate the *next*
+invocation in the same workspace has almost nothing to accelerate.
+
 **None of this is macOS-specific.** The RAR state file behaves the same way on Windows and Linux; it
 was invisible there only because nobody had pointed two workspaces at one cache and counted. It is
 the kind of defect that a cross-machine cache exposes and a single-machine cache hides.

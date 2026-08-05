@@ -357,6 +357,7 @@ namespace Test.BuildXL.FrontEnd.MsBuild
         [Theory]
         [InlineData("/noAutoResponse")]
         [InlineData("/nodeReuse:false")]
+        [InlineData("/p:DisableRarCache=true")]
         public void CommonArgumentsAreSet(string argument)
         {
             var project = CreateProjectWithPredictions("A.proj");
