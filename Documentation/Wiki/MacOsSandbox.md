@@ -1502,8 +1502,10 @@ option is ignored". Two workarounds were tried and both failed:
 
 So the honest scope of §14's result is *one machine, across time* — which is the developer
 inner-loop case, and is real — but not yet *across machines*, which is the CI and dev-cache case.
-Closing it needs source-root tokenisation in the fingerprint rather than a drive-letter subst, and
-that would benefit Linux equally.
+
+**§15 supersedes this section.** The conclusion drawn above — that closing the gap needs source-root
+tokenisation in the fingerprint — is wrong, and the third workaround that was never tried is the one
+that works. Both are corrected there.
 
 ### 14.7 What this adds to §13, and what it does not
 
@@ -1528,6 +1530,211 @@ Does not add:
 | # | Item | Why it is ranked here |
 |---|---|---|
 | 1 | **Augmented manifest ingress for the Unix sandboxes** | Worth 6x on cold MSBuild builds (§14.5). Needs a transport for `AugmentedManifestReporter` off Windows plus breakaway for a `dotnet`-hosted `VBCSCompiler`, which cannot be matched by process name |
-| 2 | **Source-root tokenisation in fingerprints** | Unblocks cross-workspace and cross-machine caching on macOS *and* Linux (§14.6). This is the CI story |
+| 2 | ~~Source-root tokenisation in fingerprints~~ | **Withdrawn.** §15 shows this is the wrong fix — BuildXL deliberately rejects tokenising non-system mounts, and cross-machine caching works today without it |
 | 3 | Reference-assembly awareness for MSBuild pips | Would close the method-body-change row (§14.5). Large change; the trade is deliberate today |
 | 4 | The `ResGen.Lite` `DX0500` in §13.6 | Still one occurrence in fourteen cold builds, still unexplained |
+
+## 15. Caching across machines, and fetching the results
+
+§14.6 concluded that cross-workspace caching does not work on Unix and that closing it needs
+source-root tokenisation in the fingerprint. The first half was a correct measurement of a wrong
+configuration. The second half was simply wrong. Both are corrected here.
+
+### 15.1 BuildXL does not tokenise the source root, and that is deliberate
+
+The tokenisation machinery exists. `MountPathExpander` can rewrite a path to `%MountName%/...`, and
+`MountsTable` decides which mounts get that treatment. It restricts the set on purpose:
+
+> We don't tokenize all mounts because that can lead to incorrect fingerprinting. E.g. let's say a
+> tool writes a path P in an output file, P is a descendant of a tokenized mount root M and the
+> corresponding pip gets cached. If the pip is looked up on a machine where M is a different root M',
+> then we can get a cache hit, whereas it should have been a miss because the tool would have
+> produced an output file with a written path P'.
+> — `Public/Src/Engine/Dll/MountsTable.cs`
+
+Only *system* mounts, and mounts beneath them, are tokenised. `PipFingerprinter` records that the
+behaviour was narrowed further still: it "used to check `process.ProducedPathIndependentOutput` …
+That was when the `MountPathExpander` tokenized paths based on what mount they were under. It now
+only has this behavior for the user profile directory."
+
+So tokenising the source root is not a missing feature. It is a rejected one, and the rejection is
+sound: any tool that bakes an absolute path into an output — every PDB, every `.deps.json`, every
+generated source file — would make the cache silently wrong.
+
+**Which means `/RunInSubst` on Windows is not tokenisation either.** It maps the repository root to a
+drive letter so that the root is *the same literal path on every machine*. Path identity, not path
+abstraction. That sidesteps the unsoundness completely: if the path really is identical everywhere,
+then a path embedded in an output is correct everywhere too.
+
+The question for macOS is therefore not "how do we tokenise" but "what plays the role of `subst`".
+
+### 15.2 A mount point is the Unix `subst`
+
+§14.6 tried a symlink and it failed, because tools canonicalise. A **mount point does not
+canonicalise** — it is a real directory in the VFS, and `realpath` returns it unchanged:
+
+```
+$ cd /Volumes/BXLSRC/probe && pwd -P
+/Volumes/BXLSRC/probe
+>>> os.path.realpath('.')
+'/Volumes/BXLSRC/probe'
+```
+
+On macOS an APFS volume or a sparse disk image mounts at `/Volumes/<volname>` with no root privileges,
+no `/etc/synthetic.conf` edit and no kernel extension. Two machines that name the volume identically
+have the source at an identical absolute path. That is the whole mechanism.
+
+The A/B, on the 60-project / 2,460-file graph of §14, against one shared `/cacheDirectory`:
+
+| Workspace | Source root | Cache hits | Wall |
+|---|---|---|---|
+| Volume 1 — populates the cache | `/Volumes/BXLSRC/work` | 0 / 58 (cold) | 82 s |
+| **Volume 2 — a different APFS volume at the same path** | `/Volumes/BXLSRC/work` | **58 / 58** | **16 s** |
+| **Volume 3 — a third volume at the same path** | `/Volumes/BXLSRC/work` | **58 / 58** | **16 s** |
+| Control — an ordinary directory | `/Users/janpro/xmctl` | 0 / 58 | 85 s |
+
+Same machine, same binary, same sources, same cache. The only variable is the absolute path of the
+source root, and it decides everything. The control is the important row: it is §14.6's original
+measurement, reproduced, so the two results are consistent rather than contradictory.
+
+The volumes are genuinely distinct storage — different sparse images, different devices, different
+inode numbers, and no BuildXL state carried across. What they share is a path.
+
+### 15.3 Fetching the results: an empty local cache and a shared remote
+
+Path portability alone would only prove that fingerprints match. "Fetch the results" needs the
+content to arrive from somewhere else. BuildXL's `VerticalAggregator` provides the topology: a local
+L1 and a shared L2, configured through `/cacheConfigFilePath`.
+
+```json
+{
+  "Assembly": "BuildXL.Cache.VerticalAggregator",
+  "Type": "BuildXL.Cache.VerticalAggregator.VerticalCacheAggregatorFactory",
+  "RemoteIsReadOnly": false,
+  "WriteThroughCasData": true,
+  "LocalCache":  { "Assembly": "BuildXL.Cache.MemoizationStoreAdapter",
+                   "Type": "BuildXL.Cache.MemoizationStoreAdapter.MemoizationStoreCacheFactory",
+                   "CacheId": "L1Local", "MaxCacheSizeInMB": 10240,
+                   "CacheLogPath": "[BuildXLSelectedLogPath]",
+                   "CacheRootPath": "[BuildXLSelectedRootPath]" },
+  "RemoteCache": { "Assembly": "BuildXL.Cache.BasicFilesystem",
+                   "Type": "BuildXL.Cache.BasicFilesystem.BasicFilesystemCacheFactory",
+                   "CacheId": "L2Shared", "StrictMetadataCasCoupling": true,
+                   "CacheRootPath": "/Users/janpro/xmL2" }
+}
+```
+
+Machine A populates: 74 s, 0 hits, and the L2 ends up holding 60 fingerprint entries and 876
+content blobs, 102 MB.
+
+Machine B is a brand-new volume at the same mount point, with **no build outputs and no local cache
+directory at all** — `~/xmL1b` did not exist when the build started:
+
+```
+PRE-BUILD  dlls=0   L1=ABSENT
+Processes: [58 done (58 hit), 0 executing, 0 waiting]      24 s
+POST-BUILD dlls materialized=1006
+```
+
+1,006 assemblies appeared on a volume that had none, from a cache the workspace had never written to.
+The local L1's memoization database reports zero hits *and* zero misses, so the descriptors came from
+L2. Repeated on the same volume with three separate empty L1 directories: 58/58 every time, 7–14 s.
+
+That is the CI shape — an agent with an empty workspace and an empty local cache, pulling a whole
+build out of a shared store.
+
+### 15.4 The defect that made it intermittent, and why it was not the sandbox
+
+The first runs were not clean: across fourteen fresh-workspace builds, three missed completely. An
+intermittent 20% cold-miss rate would make the whole idea unusable, so it was worth chasing.
+
+BuildXL named the miss type — `MissForDescriptorsDueToWeakFingerprints`, meaning the *statically*
+declared inputs differed. Three measurements narrowed it:
+
+1. **The inputs were byte-identical.** A manifest of all 2,823 non-output files, captured per cycle,
+   differed in **0** files between a cycle that hit and a cycle that missed. `dotnet restore` was
+   separately verified deterministic at a fixed path (240 restore artifacts, 0 differing).
+2. **The shared cache accumulated exactly three fingerprint generations.** Its weak-fingerprint entry
+   count went 60 → 120 → 180 for the same 58 pips, then stopped: six further fresh-volume builds
+   added nothing and all hit. So the variation had low cardinality and saturated.
+3. **The outputs were not deterministic.** Content blobs grew 876 → 1,458, which cannot happen in a
+   content-addressed store unless executions produce different bytes. Forcing two full executions
+   with different fingerprint salts and diffing every produced file: **49 of 2,806 differed, and all
+   49 were `*.csproj.AssemblyReference.cache`** — MSBuild's `ResolveAssemblyReference` state file.
+
+That closes the loop. The RAR state file is written into each project's intermediate directory, its
+serialised content is not stable across runs, and it is a pip output; its instability propagates into
+the weak fingerprints of dependent pips, forking the cache on every execution.
+
+Under BuildXL the file is also pointless. It exists to give MSBuild its own incrementality, which
+BuildXL replaces — each project is an isolated pip with its own cache entry. So `PipConstructor` now
+suppresses it alongside the other MSBuild behaviours BuildXL already turns off:
+
+```csharp
+// Public/Src/FrontEnd/MsBuild/PipConstructor.cs
+"/nodeReuse:false",
+"/p:DisableRarCache=true"
+```
+
+Measured after the change, with no workaround in the demo tree:
+
+| | before | after |
+|---|---|---|
+| Output files differing between two identical full executions | 49 of 2,806 | **0 of 2,757** |
+| Weak-fingerprint generations in the shared cache for 58 pips | 3 | **1** |
+| Fresh volume, empty L1, shared L2 | intermittent | 58/58, 6–10 s |
+
+**None of this is macOS-specific.** The RAR state file behaves the same way on Windows and Linux; it
+was invisible there only because nobody had pointed two workspaces at one cache and counted. It is
+the kind of defect that a cross-machine cache exposes and a single-machine cache hides.
+
+### 15.5 What this does not prove
+
+- **The L2 is a shared directory, not a network service.** The topology, the miss/fetch path and the
+  materialisation are real, but the transport is a filesystem. `AzureBlobStorageCacheFactory`,
+  `BlobCacheFactory` and `EphemeralCacheFactory` all ship in the `osx-arm64` deployment and were not
+  exercised — see below for why.
+- **One machine.** The volume swap makes the storage, the inodes, the file identities and the local
+  cache genuinely fresh, but the OS install, the user profile and the SDK are shared. Encouragingly
+  `ExtraFingerprintSalts` contains no machine name, user name or host identifier — the only
+  host-dependent salt is the Linux distribution id, and macOS contributes nothing — and the user
+  profile is one of the two things still tokenised, so `~/.nuget` differing per user is handled by
+  design. Neither was tested with a second account.
+- **A second developer's SDK is assumed identical.** Nothing here establishes what happens when the
+  .NET SDK patch version differs; the SDK's own files are declared inputs, so it should miss
+  correctly rather than be wrong, but that is reasoning, not a measurement.
+
+**Why the blob path could not be tested here, and a finding that matters more than the test.** The
+repo vendors an Azurite emulator as `BuildXL.Azurite.Executables`, and it ships `win-x64`,
+`linux-x64` and `osx-x64` binaries only — `AzuriteStorageProcess` hard-codes `tools/osx-x64/blob`. On
+Apple Silicon that has always meant Rosetta. **This machine, on macOS 27.0 (26A5388g), has no Rosetta
+2 at all**: `/Library/Apple/usr/libexec/oah` contains only `RosettaLinux`, and a freshly compiled,
+trivial `x86_64` binary fails with `Bad CPU type in executable`. Building an arm64 Azurite instead was
+not possible either — `registry.npmjs.org` is unreachable from this network, which is also why the
+four npm graph-builder pips in §12 fail.
+
+That is worth more than the test it blocked. §10 justified making `osx-arm64` a first-class runtime
+identifier partly by observing that the old macOS pipeline downloaded `osx-x64` binaries and passed
+only because the agent image shipped Rosetta — it was testing emulation. On macOS 27 that pipeline
+would not run at all. The `osx-arm64` work is not an optimisation; it is the difference between
+working and not working, and the same is now true of the Azurite test fixture.
+
+### 15.6 Where this leaves the cross-machine question
+
+The blocker identified in §14.6 was real, but it was a configuration problem with a wrong diagnosis,
+not an architectural gap. Cross-workspace caching on macOS needs no new BuildXL feature: it needs the
+source root at a stable absolute path, which a mount point provides, plus one defect fixed in the
+MSBuild resolver.
+
+What has to be true for a team to actually get this, in order of remaining risk:
+
+| | Requirement | Status |
+|---|---|---|
+| 1 | Source root at an identical absolute path on every machine | **Solved on macOS** by a named volume mount. Needs a convention, not code. Linux has `mount --bind`; the same reasoning applies |
+| 2 | Deterministic pip outputs | **One defect found and fixed.** There is no guarantee others do not exist; the method that found this one — forced double execution and a full output diff — is cheap and should be run per frontend |
+| 3 | A shared cache the build can reach | Topology proven with a shared L2. A real network backend is untested on macOS |
+| 4 | Content actually fetched, not just fingerprints matched | **Proven**: 1,006 assemblies materialised into an empty workspace from an empty local cache |
+
+Items 1, 2 and 4 are the ones that were in doubt, and they are the ones now measured. Item 3 is the
+one a funded increment would have to close, and nothing found here suggests it is hard — it is
+managed code that already ships in the `osx-arm64` deployment.

@@ -51,7 +51,15 @@ namespace BuildXL.FrontEnd.MsBuild
             "/IgnoreProjectExtensions:.sln", // Tells MSBuild to avoid scanning the local file system for sln files to build, but instead to simply use the provided project file.
             "/ConsoleLoggerParameters:Verbosity=Minimal", // Minimize the console logger
             "/noAutoResponse", // do not include any MSBuild.rsp file automatically,
-            "/nodeReuse:false" // Even though we are already passing /m:1, when an MSBuild task is requested with an architecture that doesn't match the one of the host process, /nodeReuse will be true unless set otherwise
+            "/nodeReuse:false", // Even though we are already passing /m:1, when an MSBuild task is requested with an architecture that doesn't match the one of the host process, /nodeReuse will be true unless set otherwise
+            // ResolveAssemblyReference writes a state file (obj/<project>.csproj.AssemblyReference.cache) whose serialized
+            // content is not stable across runs. Under BuildXL every project is an isolated pip with its own caching, so this
+            // file buys no incrementality, but it is a pip output and its instability propagates into the weak fingerprints of
+            // dependent pips. Measured on a 60-project graph: two identical full executions produced 49 differing output files,
+            // all of them this state file, and a shared cache accumulated three distinct fingerprint generations for the same
+            // 58 pips - so a fresh workspace often missed. With the state file disabled the same two executions produce
+            // byte-identical outputs and the cache holds a single generation, which is what makes cross-machine hits reliable.
+            "/p:DisableRarCache=true"
         };
 
         // Keep in sync with the bxl deployment
