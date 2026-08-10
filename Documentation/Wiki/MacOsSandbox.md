@@ -550,7 +550,7 @@ The sandbox is necessary but not sufficient. Ranked, with evidence:
 
 | # | Blocker | Evidence | Nature |
 |---|---|---|---|
-| 1 | **The ES entitlement, for distribution only** | `ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED` without it. With SIP+AMFI relaxed locally the ES backend runs and is fully measured (§4.4) | External (Apple). Does **not** gate C or E — those are met through the interposition ingress, which needs no entitlement (§4.2, §13) |
+| 1 | **The ES entitlement, for distribution *and* for any end-to-end measurement** | `ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED` without it. With SIP+AMFI relaxed locally the ES backend runs and is fully measured (§4.4, §16). But relaxing AMFI stops **every** .NET process from starting, so the sandbox and the engine cannot run on one machine without the real entitlement (§16.7) | External (Apple). Does **not** gate C or E — those are met through the interposition ingress, which needs no entitlement (§4.2, §13) |
 | 2 | ~~**`osx-arm64` is not a runtime identifier anywhere in the repo**~~ | See §10 | **Fixed by this work** |
 | 3 | **Grpc.Core has no arm64 slice for macOS** | `Grpc.Core` 2.46.6 ships `linux-arm64` but no `osx-arm64`; its `libgrpc_csharp_ext.x64.dylib` is non-fat x86_64 (verified with `lipo`) | Root cause of #2. Mitigation is already in progress: `GrpcDotNetClientOptions`/`GrpcDotNetServerOptions` exist, so this is finishing a migration, not starting one |
 | 4 | **Tests disabled on macOS** | `Public/Src/Deployment/Tests.MacOS/Tests.MacOS.dsc:22,33,36,38` — "Depends on Grpc.Core which is not supported on arm64" | Downstream of #3 |
@@ -558,6 +558,8 @@ The sandbox is necessary but not sufficient. Ranked, with evidence:
 | 6 | **`MsBuildGraphBuilder` deploys `net472` + `dotnetcore`** | `Tool.MsBuildGraphBuilder.dsc:75-86` | Only the `dotnetcore` variant is usable on macOS; needs to be selected there |
 | 7 | **`Grpc.Tools` has no `macosx_arm64`** | Verified absent at 2.71.0 and 2.83.0; `grpc/grpc` publishes no binary release assets at all | External (grpc). Blocks a *cold* native build: the seven codegen pips cannot run, and a shared cache does not help because the tool hash is part of the fingerprint. Selection code is already in place (§12.4) |
 | 8 | **`BuildXL.Tools.AppHostPatcher` has no `tools/osx-arm64`** | `DX9377: Could not find file ... /tools/osx-arm64/AppHostPatcher` | Internal, fix written and committed; needs one run of `.azdo/publish-app-host-patcher` (§12.1) |
+
+| 9 | **Interposition does not observe the toolchain it runs** | Measured against ES on an identical build: `make`, `libtapi.dylib`, `libcodedirectory.dylib` and `libswiftDemangle.dylib` get **0** records under interposition and 20–21 under ES. dyld maps them before any user code runs, so no hook can see them | Internal, and a **correctness** blocker rather than a performance one: the toolchain is absent from the fingerprint, so upgrading it does not invalidate the cache (§16.2) |
 
 Fixed as part of this work: `MsBuildWorkspaceResolver.TryFindDotNetExe` searched for the literal
 string `"dotnet.exe"` with no OS guard, so dotnet-core MSBuild could never be located on macOS or
@@ -1974,3 +1976,206 @@ What has to be true for a team to actually get this, in order of remaining risk:
 Items 1, 2 and 4 are the ones that were in doubt, and they are the ones now measured. Item 3 is the
 one a funded increment would have to close, and nothing found here suggests it is hard — it is
 managed code that already ships in the `osx-arm64` deployment.
+
+## 16. Endpoint Security measured against interposition, on the same build
+
+§4.4 established that the ES ingress runs against the real kernel and is clean. It did not answer
+the question that decides whether ES is worth an entitlement at all: **what does it buy over the
+interposition sandbox that already works and needs no entitlement?**
+
+Both ingresses were run over an identical workload — 61 C files compiled and linked with clang at
+`-j8` — interleaved, load-gated below 4, five repetitions. The two ingresses share everything above
+the ingress boundary, so a difference between them is a difference in what the kernel tells them.
+
+### 16.1 Cost
+
+| arm | median | min | max | vs unobserved | events | reports | processes |
+|---|---|---|---|---|---|---|---|
+| unobserved | 0.61 s | 0.60 | 0.62 | 1.00× | — | — | — |
+| interposition | 0.79 s | 0.79 | 0.80 | 1.30× | 13,660 | 13,721 | 128 |
+| Endpoint Security | 0.95 s | 0.94 | 0.98 | 1.56× | 64,011 | 56,978 | 134 |
+
+Five repetitions produced a spread of 0.02 s, so the ordering is not in doubt. Both arms reported
+`taintReason: None` and zero sequence gaps in every run.
+
+**This is a deliberately hostile workload for ES.** 61 compilations in 0.61 s is about 105,000
+kernel events per second of real work; a build whose pips do more work each is far less event-dense.
+Read 1.56× as an upper bound at maximum density, not as what a normal build pays — §13 measured the
+interposition sandbox at 1.19× on a cold 294-pip build and 0–4% incrementally, and ES's *marginal*
+cost per event is lower, not higher:
+
+| | added wall | events | per event |
+|---|---|---|---|
+| interposition | +0.18 s | 13,660 | 13.2 µs |
+| Endpoint Security | +0.34 s | 64,011 | **5.3 µs** |
+
+ES costs more in total because it sees 4.7× more, not because each observation is dearer. Which
+raises the only question that matters about the extra 50,351 events: are they noise?
+
+### 16.2 Coverage — and a class of false cache hit
+
+Comparing the reported paths of the two arms, after normalising clang's per-invocation random temp
+names and the two spellings macOS gives the same file (`/tmp` vs `/private/tmp`, `MacOSX.sdk` vs
+`MacOSX27.0.sdk`):
+
+| | |
+|---|---|
+| paths seen only by Endpoint Security | **180** |
+| paths seen only by interposition | **0** |
+
+ES observes a strict superset. Three paths initially appeared to be interposition-only, which would
+have been a serious hole; all three were false, and chasing them found a real defect — see §16.3.
+
+The interesting part is *which* paths ES sees alone. Excluding `exec` argument vectors:
+
+| ES-only path | records under interposition | records under ES |
+|---|---|---|
+| `/Library/Developer/CommandLineTools/usr/bin/make` | **0** | 21 |
+| `/Library/Developer/CommandLineTools/usr/lib/libtapi.dylib` | **0** | 20 |
+| `/Library/Developer/CommandLineTools/usr/lib/libcodedirectory.dylib` | **0** | 20 |
+| `/Library/Developer/CommandLineTools/usr/lib/libswiftDemangle.dylib` | **0** | 20 |
+
+These are not noise. They are **the build tool itself and three shared libraries the toolchain
+loads** — with `open`, `mmap`, `stat` and `close`. They are build inputs by any definition: if
+`libtapi.dylib` is upgraded, link output can change.
+
+Interposition reports zero accesses to all four, and this is structural rather than an oversight.
+`DYLD_INSERT_LIBRARIES` hooks 62 libc symbols in the traced process, but dyld maps the main
+executable and its dependent libraries *before* any user code in that process runs, so those
+accesses happen where there is nothing yet to observe them. Neither `dlopen` nor `mmap` appears in
+`bxl-interpose.c` at all; hooking `dlopen` would recover later loads, but nothing hookable can
+recover the ones that happen before the interposer exists.
+
+**The consequence is a false cache hit.** Under interposition the toolchain is not in the
+fingerprint, so upgrading the linker's support libraries does not invalidate anything and the build
+returns stale outputs. Under ES it does. This — not throughput, and not the enforcement boundary —
+is the concrete argument for the entitlement.
+
+The caveat is that it is a *class* demonstrated on one workload, not a full audit. 180 paths were
+compared on one build; a different toolchain may leak differently.
+
+### 16.3 A defect found by disbelieving the comparison
+
+Three paths appeared to be seen only by interposition. Rather than report a hole in ES, each was
+checked, and all three turned out to be the same file under a different spelling:
+
+```
+interpose  62x open    /Library/Developer/CommandLineTools/usr/local/lib/clang/workarounds.jsonl
+es         62x lookup  /Library/Developer/CommandLineTools/usr/bin/../local/lib/clang/workarounds.jsonl
+```
+
+ES reports the path the caller supplied, not a resolved one, and the ingress concatenated it
+verbatim — so `..` survived into the report. That is not cosmetic. `AccessChecker` resolves policy
+by walking the manifest's path tree, so a path carrying `..` matches no node: an access inside a
+declared cone is judged as if it were outside one, which is a spurious violation or a silently
+unreported access depending on which policy it should have hit. It also splits one file across two
+fingerprint entries, so the two backends cannot agree on a cache key for the same build.
+
+Fixed by cleaning lexically — `.`, `..`, duplicate separators and a trailing separator — once at the
+end of `Normalize`, rather than at each of the 44 sites that assign a path, so a newly modelled
+event cannot forget it. Lexical rather than `realpath` on purpose: `realpath` would be a syscall on
+each of 64,011 events *and* would resolve symlinks, moving the disagreement with the interposer
+instead of removing it, since the interposer is deliberately lexical. Lexical `..` removal is
+unsound when a component is a symlink; that is the trade-off every other BuildXL sandbox already
+makes.
+
+Seventeen cases are in the self test, including both spellings measured live, `..` at and past the
+root, and names that only look like dot segments (`/...`, `/a/..b/c`, `/a/b../c`). The self test is
+now 103 checks. Verified live afterwards: ES emits the cleaned spelling, counts unchanged, and
+interposition-only paths went **3 → 0**.
+
+### 16.4 What was left of the two backends' disagreement
+
+Two spelling differences remain, and they are properties of the kernel rather than defects:
+
+| | interposition | Endpoint Security |
+|---|---|---|
+| `/tmp` (a firmlink) | `/tmp/...` — reports what the caller passed | `/private/tmp/...` — reports the resolved vnode |
+| `MacOSX.sdk` (a symlink) | `MacOSX.sdk/...` | `MacOSX27.0.sdk/...` |
+
+**The two backends are therefore not interchangeable for caching**: a fingerprint produced under one
+will not match the other. Within a single backend this is consistent and harmless, and `es-run.sh`
+already names both `/tmp` and `/private/tmp` as manifest scopes for exactly this reason. Making them
+interchangeable is unfinished work, and the honest position is that it is unproven either way which
+spelling BuildXL should prefer.
+
+### 16.5 Two operational findings from the same run
+
+**The Xcode shim defeats the shadow-tool mechanism.** The first attempt to run `make` under
+interposition failed with
+
+```
+xcode-select: Failed to locate 'make-4ae58c797353c675-118640-1784265256.000000000'
+```
+
+`/usr/bin/make` and `/usr/bin/clang` are *the same 118,640-byte file* with 78 hard links: they are
+`libxcselect` shims that dispatch on their own filename. Interposition must shadow-copy platform
+binaries under a mangled name to stop dyld stripping `DYLD_INSERT_LIBRARIES`, and the mangled name
+is exactly what the shim then fails to resolve. ES has no equivalent problem — it needs no copy.
+The benchmark above therefore invokes the real toolchain under
+`/Library/Developer/CommandLineTools/usr/bin`, so that it measures the sandboxes rather than the
+shim. Anything driving `/usr/bin/cc` under interposition on a developer Mac will hit this.
+
+**Backends must announce themselves.** The backend name previously reached the log only through
+`WriteTaint`, which fires when a pip taints — so a clean build never recorded which sandbox produced
+it, while `auto` silently falls back from ES to interposition. That is precisely how a number gets
+attributed to the wrong sandbox. The broker now announces its backend at startup unconditionally.
+
+### 16.6 Where ES's fixed per-pip cost went
+
+An ES-observed pip running a trivial tool cost **520 ms**; the same pip under interposition cost
+6 ms. Phase timers put all of it in the two fences — baseline established at 251 ms, stream closed at
+513 ms, everything else about 1 ms — and none of it in the tool.
+
+ES client warm-up was the obvious suspect and is not the cause: `Diagnostics/es-warmup.c` measures
+`es_new_client` plus subscribe at 218 µs, with the first event arriving 917 µs later. The difference
+between that probe and the broker is that the probe emitted markers in a loop and the broker emitted
+one:
+
+| emission pattern | first-event latency |
+|---|---|
+| one `stat` on a missing path | 251,000 µs |
+| one `open` + `create` | 251,000 µs |
+| re-emit until observed | **535 µs**, after a median of 15 emissions |
+
+**Endpoint Security does not flush a nearly-idle NOTIFY queue; it sits on a ~250 ms timer.** A fence
+that emits once and waits pays that timer in full, twice per pip, on the critical path. On §13's
+294-pip build that is roughly 15 s of a 163 s build spent waiting for a queue holding one entry.
+
+Fixed by chasing the marker instead of waiting for it: wait in short slices and re-emit on each
+timeout, against the same overall deadline. Sound because the marker is a `stat` on a path that does
+not exist — extra emissions have no side effect — and `TryConsumeMarker` already discards
+marker-shaped events arriving outside a window. The replay backend needed care, since its emitter
+pumps the whole corpus synchronously and a second emission would invent events; waiting first and
+re-emitting only on timeout is safe there by construction, because replay observes its own marker
+inside the emitter and the first slice always succeeds.
+
+Measured after, on the same tool: **520 ms → 34 ms**, fence latency 11.6 ms, `taintReason: None`.
+Self test unaffected.
+
+### 16.7 Disabling AMFI to test ES breaks .NET, and that is the argument for the entitlement
+
+Relaxing SIP and AMFI is what makes an ad-hoc signature carry the ES entitlement, and §4.5 presents
+it as the way to answer these questions without Apple. It has a consequence that section did not
+anticipate: **with AMFI disabled, no .NET process starts on the machine at all.**
+
+Every .NET binary, `dotnet --version` included, fails with `Failed to create CoreCLR, HRESULT:
+0x8007000C`. Tracked down with a `DYLD_INSERT_LIBRARIES` interposer that logs failing memory calls:
+CoreCLR calls `mprotect(PROT_READ|PROT_WRITE)` on a page **inside libcoreclr.dylib's own image**, and
+gets `EACCES` — which is `ERROR_INVALID_ACCESS`, which is `0x8007000C`. That call needs a
+code-signing exemption, and AMFI is what grants exemptions; with AMFI out of the way the entitlement
+mechanism is inert. Signing `dotnet` with `com.apple.security.cs.disable-executable-page-protection`
+changed nothing, which is the confirming evidence rather than a failed fix.
+
+Ruled out first, each by direct probe: Server GC, `TMPDIR`, `ulimit -n`, OS build drift, `MAP_JIT`,
+the full `pthread_jit_write_protect_np` write/execute cycle, and Mach exception ports.
+
+**So on one machine you can have the ES sandbox or you can have BuildXL, not both.** The entitlement
+is not bureaucracy; it is the only way to run the sandbox and the engine together, which makes the
+end-to-end measurement — a real BuildXL build on the ES backend — the one thing in this document
+that cannot be produced without Apple. Everything in §16 is measured on the broker directly for that
+reason.
+
+This inference is strong but not yet closed by experiment: the clean confirmation is a reboot with
+AMFI restored, checking that `dotnet --version` works again *and* that the broker now reports
+`ERR_NOT_ENTITLED`. That is two minutes of work and it is the next thing to do.
