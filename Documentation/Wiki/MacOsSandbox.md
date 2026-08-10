@@ -60,9 +60,11 @@ self-signing does not work: with SIP enabled, AMFI `SIGKILL`s the process (exit 
 verified, not assumed.
 
 This is an external dependency on Apple, and it gates end-to-end validation. It is **not** a design
-risk — the entitlement is routinely granted to build and security tooling — but it does mean the
-claims in §4 are split into "proven" and "not yet proven", and no claim in the second group is
-presented as if it were in the first.
+risk — the entitlement is routinely granted to build and security tooling — but the consequence is
+blunt and worth putting at the top rather than in a footnote: **the Endpoint Security sandbox has
+never been run.** Not once, on this machine or any other. Everything in §4.1 is the engine driven by
+a synthetic event source, and every build measurement in §13 and §14 is the dyld-interpose backend.
+§4.4 enumerates precisely what that leaves unproven.
 
 ---
 
@@ -197,8 +199,16 @@ real cache. §13 has the numbers, the protocol, and the two defects the measurem
 
 What interposition does *not* give you is written down in §13.5 rather than glossed: it observes
 cooperating processes, so it is a correctness tool for a build, not a security boundary. The ES
-ingress remains the answer for anyone who needs the latter, and gates A, B, B2, D1–D3 are measured
-against the ES ingress on every build via the self-test pip.
+ingress remains the answer for anyone who needs the latter.
+
+Gates A, B, B2 and D1–D3 are measured against the engine that the ES ingress feeds, driven by
+`ReplaySource`, not against `EsIngress` itself. Per §3 that is evidence about the protocol and never
+about the kernel. **No number anywhere in this document was produced by a live Endpoint Security
+client**, because none has ever run here: on this machine `es_new_descendants_client` returns
+`ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED` (3), and an ad-hoc signature carrying the entitlement is
+`SIGKILL`ed by AMFI (exit 137) with SIP enabled. Every build measurement in §13 and §14 used the
+dyld-interpose backend; the execution logs record `Context: macOS sandbox (dyld-interpose backend)`
+for all 81 tainted pips and never the ES backend. §4.4 lists exactly what that leaves unproven.
 
 ### 4.3 Bugs this work found and fixed
 
@@ -210,6 +220,26 @@ found by tooling, and all three would have been silent in production:
 | The root process's start event was suppressed. `fromBroker` was computed from the event *actor* before the `FORK` handler rewrites `self` to the child, so the broker forking the pip root looked like a broker self-event. | BuildXL would never see the pip's root process start. |
 | Every build began with an `UnmappedLineage` taint, because the root's `FORK` names the broker as parent and the broker was not in the process table. | Every build permanently uncacheable — the exact failure this project exists to prevent. |
 | The broker `SIGTRAP`ped at teardown: `FileAccessManifest` takes ownership through `unique_ptr<char[]>` but was handed `std::vector::data()`. | Double free at the end of every pip. |
+
+### 4.4 What the missing entitlement leaves unproven
+
+Stated as a list so nobody has to infer it. The ES ingress has been compiled and linked against the
+real macOS 27 SDK — `nm -u` on the shipped broker shows `_es_new_descendants_client`,
+`_es_set_deadline_miss_mode` and `_es_subscribe` as undefined symbols resolved from
+`libEndpointSecurity` — but it has never processed a single kernel message.
+
+| Unproven | Why it cannot be closed here | What would close it |
+|---|---|---|
+| `EsIngress::Normalize` maps a real `es_message_t` correctly for every subscribed event type | needs a live client | one entitled run of the §5 benchmark |
+| The subscription set is accepted by `es_subscribe` as written, including the probe events | needs a live client | same |
+| ES throughput and latency under a real build; D1/D2 are `ReplaySource` numbers and measure the engine, not the kernel | needs a live client | same |
+| `ES_DEADLINE_MISS_MODE_FAIL_OPEN` actually degrades to a `global_seq_num` gap rather than a dead client | needs a live client | same, plus a deliberately slow handler |
+| Whether one descendants client per concurrent pip stays inside the OS client budget | needs a live client | a run at `/maxProc` on a low-core machine |
+
+The last row is the one to watch, because it is where the 2020 implementation broke (§16): it
+sharded six system-wide clients across event buckets and still had to switch the probe events off on
+a 2-core CI VM. Kernel-side descendant scoping is the reason to expect a different outcome, not a
+demonstration that there will be one.
 
 ---
 
