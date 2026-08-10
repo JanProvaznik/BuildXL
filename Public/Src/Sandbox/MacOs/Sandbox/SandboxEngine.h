@@ -119,6 +119,21 @@ struct EngineOptions
     /** How long to wait for a fence marker before giving up and tainting. */
     std::chrono::milliseconds fenceTimeout{5000};
 
+    /**
+     * How long to wait for a marker to be observed before emitting another one.
+     *
+     * Endpoint Security does not flush a nearly-idle NOTIFY queue immediately; measured on macOS
+     * 27, a lone marker takes ~251 ms to come back, while re-emitting until observed takes ~535 us
+     * after about 15 emissions. Both fences are on every pip's critical path, so emitting once and
+     * waiting costs ~500 ms per pip for nothing. Re-emission is sound because the marker is a stat
+     * on a path that does not exist: it has no side effect, and the protocol already swallows
+     * marker-shaped events that arrive outside a marker window.
+     *
+     * Backends that deliver their marker synchronously - the replay source pumps its whole corpus
+     * inside the emitter - satisfy the first wait and never re-emit.
+     */
+    std::chrono::milliseconds fenceReemitInterval{1};
+
     /** How many times to retry an unobserved fence marker. */
     uint32_t maxFenceAttempts = 3;
 
@@ -175,6 +190,12 @@ public:
 
     /** Emits the baseline marker and waits for it to be observed. */
     bool EstablishBaseline();
+
+    /**
+     * Waits for a fence marker, re-emitting it until it is observed or the fence deadline passes.
+     * See EngineOptions::fenceReemitInterval for why a single marker is not enough.
+     */
+    bool AwaitMarker(FenceProtocol::State desired);
 
     /**
      * Emits the closing marker and waits for it to be observed, retrying up to maxFenceAttempts.

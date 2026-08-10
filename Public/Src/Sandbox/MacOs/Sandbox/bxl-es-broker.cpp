@@ -474,6 +474,16 @@ int main(int argc, char **argv)
         return kBrokerFailureExitCode;
     }
 
+    // Announced unconditionally, because otherwise the backend name only reaches the log when a pip
+    // taints (see WriteTaint below) - so a clean build, which is the case anyone benchmarking cares
+    // about, could not be attributed to a backend at all. "auto" silently falls back to interposition
+    // when Endpoint Security cannot start, and a fallback nobody can see is a measurement hazard: it
+    // is exactly how a number gets attributed to the wrong sandbox.
+    sink.WriteDebugMessage(
+        buildxl::linux::DebugEventSeverity::kInfo,
+        static_cast<int32_t>(getpid()),
+        std::string("macOS sandbox observing with the ") + ingress->BackendName() + " backend");
+
     const std::string noncePath = MakeNoncePath();
 
     SandboxEngine engine(

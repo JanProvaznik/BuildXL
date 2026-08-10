@@ -525,9 +525,17 @@ function installCredProvider() {
         return;
     fi
 
-    # Download the artifacts credential provider
+    # Download the artifacts credential provider. macOS ships curl but not wget, and Linux
+    # distributions vary, so whichever is present is used rather than assuming wget.
     mkdir -p "$destinationFolder"
-    wget -q -c https://github.com/microsoft/artifacts-credprovider/releases/download/v1.0.0/Microsoft.NuGet.CredentialProvider.tar.gz -O - | tar -xz -C "$destinationFolder"
+    if command -v wget > /dev/null 2>&1; then
+        wget -q -c https://github.com/microsoft/artifacts-credprovider/releases/download/v1.0.0/Microsoft.NuGet.CredentialProvider.tar.gz -O - | tar -xz -C "$destinationFolder"
+    elif command -v curl > /dev/null 2>&1; then
+        curl -sSL https://github.com/microsoft/artifacts-credprovider/releases/download/v1.0.0/Microsoft.NuGet.CredentialProvider.tar.gz | tar -xz -C "$destinationFolder"
+    else
+        print_error "Neither wget nor curl is available; cannot download the artifacts credential provider."
+        exit 1
+    fi
 
     # Remove the .exe, since we want to replace it with a script that runs on Linux
     rm "$credentialProviderExe"

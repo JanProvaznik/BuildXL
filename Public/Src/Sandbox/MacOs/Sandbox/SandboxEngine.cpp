@@ -298,6 +298,32 @@ void SandboxEngine::ProcessEvent(const NormalizedEvent &event)
     m_stats.eventsProcessed++;
 }
 
+bool SandboxEngine::AwaitMarker(FenceProtocol::State desired)
+{
+    // Endpoint Security will not flush a nearly-idle NOTIFY queue promptly, so waiting for a single
+    // marker costs about 251 ms. Chasing it with more markers gets the same answer in well under a
+    // millisecond. The wait is sliced rather than lengthened so the total deadline is unchanged.
+    const auto deadline = std::chrono::steady_clock::now() + m_options.fenceTimeout;
+
+    while (true)
+    {
+        if (m_fence.WaitFor(desired, m_options.fenceReemitInterval))
+        {
+            return true;
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            return false;
+        }
+
+        if (!m_fence.ReemitMarker())
+        {
+            return false;
+        }
+    }
+}
+
 bool SandboxEngine::EstablishBaseline()
 {
     if (!m_fence.BeginBaseline())
@@ -307,7 +333,7 @@ bool SandboxEngine::EstablishBaseline()
         return false;
     }
 
-    if (!m_fence.WaitFor(FenceProtocol::State::kReady, m_options.fenceTimeout))
+    if (!AwaitMarker(FenceProtocol::State::kReady))
     {
         m_fence.MarkTimedOut();
         AddTaint(TaintReason::kFenceTimeout);
@@ -330,7 +356,7 @@ bool SandboxEngine::CloseStream()
             continue;
         }
 
-        if (m_fence.WaitFor(FenceProtocol::State::kClosed, m_options.fenceTimeout))
+        if (AwaitMarker(FenceProtocol::State::kClosed))
         {
             m_stats.fenceLatencyNanos = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(

@@ -138,6 +138,17 @@ public:
 
     uint32_t MarkerAttempts() const;
 
+    /**
+     * Emits another copy of the marker for the window already in progress.
+     *
+     * Endpoint Security holds a nearly-idle NOTIFY queue for ~251 ms before flushing it, so a fence
+     * that emits once and waits pays that latency twice per pip. Re-emitting is safe: the marker is
+     * a side-effect-free probe of a path that does not exist, and TryConsumeMarker already discards
+     * marker-shaped events that arrive when no window is open. Returns false only if the emitter
+     * itself failed, which fails the fence exactly as an initial emission failure does.
+     */
+    bool ReemitMarker();
+
     static const char *StateName(State state);
 
 private:

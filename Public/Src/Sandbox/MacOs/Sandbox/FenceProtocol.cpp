@@ -106,6 +106,20 @@ uint64_t FenceProtocol::ClosureSequence() const
     return m_closureSequence;
 }
 
+bool FenceProtocol::ReemitMarker()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_state != State::kAwaitingBaseline && m_state != State::kAwaitingClosure)
+        {
+            // The window closed while the caller was waiting, so there is nothing to chase.
+            return true;
+        }
+    }
+
+    return EmitMarker();
+}
+
 uint32_t FenceProtocol::MarkerAttempts() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
