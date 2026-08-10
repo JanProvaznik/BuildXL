@@ -513,6 +513,20 @@ namespace BuildXL.Interop.Unix
         public const string LibraryPreferencesLogging     = "/Library/Preferences/Logging";
         public const string System                        = "/System";
         public const string SystemLibrary                 = "/System/Library";
+
+        /// <summary>
+        /// Cryptexes hold OS content that Apple ships and replaces independently of a full OS
+        /// update (Rapid Security Response). The dyld shared cache lives under them, so every
+        /// process on the machine reads from here during startup.
+        /// </summary>
+        public const string SystemCryptexes               = "/System/Cryptexes";
+
+        /// <summary>
+        /// The mounted-from location backing <see cref="SystemCryptexes"/>. dyld resolves the
+        /// shared cache through this path rather than through /System/Cryptexes, so untracking
+        /// only the latter leaves the real accesses visible.
+        /// </summary>
+        public const string PrebootCryptexes              = "/System/Volumes/Preboot/Cryptexes";
         public static readonly string UserProvisioning    = $"/Users/{s_user}/Library/MobileDevice/Provisioning Profiles";
         public static readonly string UserKeyChainsDb     = $"/Users/{s_user}/Library/Keychains/login.keychain-db";
         public static readonly string UserKeyChains       = $"/Users/{s_user}/Library/Keychains/login.keychain";

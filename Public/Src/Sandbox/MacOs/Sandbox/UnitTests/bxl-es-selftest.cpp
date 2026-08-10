@@ -345,7 +345,14 @@ static void TestCleanRunReportsEverything(buildxl::common::FileAccessManifest *m
     Check(!result.sawErrorDebugMessage, "a clean run must not emit an infrastructure error");
     Check(result.sawEndOfReports, "the end-of-reports sentinel must reach the reader");
     Check(result.sawNoActiveProcesses, "the no-active-processes sentinel must reach the reader");
-    Check(result.stats.markerEvents == 2, "exactly two fence markers must be consumed");
+    // Deliberately not an exact count. The fence re-emits a marker when one has not been observed
+    // within the retry interval, which is by design - Endpoint Security will not flush a nearly idle
+    // NOTIFY queue promptly - so the number of markers depends on how loaded the machine is. An
+    // exact count passed on an idle machine and failed when this same test ran as a pip inside a
+    // sandboxed build, which is the one environment where it matters. What has to hold is that both
+    // windows closed, and the clean-run taint assertion above already proves that: a marker that was
+    // never observed would show up as FenceTimeout.
+    Check(result.stats.markerEvents >= 2, "both fence windows must be observed");
 }
 
 static void TestEachFaultIsDetected(buildxl::common::FileAccessManifest *manifest)
@@ -1070,6 +1077,76 @@ static void TestADirectoryProbeIsNotAFileRead(buildxl::common::FileAccessManifes
           "reading an undeclared regular file must still be a violation");
 }
 
+static void TestALookupParentCostsNoFilesystemCall(buildxl::common::FileAccessManifest *manifest)
+{
+    printf("[lookup parent]\n");
+
+    // Resolution happens on the drain thread, which is also what the ingress backs up against, so
+    // every avoided syscall is queue headroom. A lookup names the directory it resolved in, and that
+    // directory is one by construction - so the parent never needs asking about. This matters because
+    // the expensive shape is exactly the repetitive one: a compiler re-resolves the same include
+    // directories for every header in every translation unit.
+    int fds[2] = {-1, -1};
+    pipe(fds);
+
+    ReportReader reader(fds[0]);
+    reader.Start();
+
+    ReportSink sink;
+    sink.AttachFd(fds[1]);
+
+    const ProcessIdentity brokerIdentity{static_cast<int32_t>(getpid()), 23};
+    const ProcessIdentity rootIdentity{100000, 1};
+
+    std::vector<std::string> asked;
+
+    EngineOptions engineOptions;
+    engineOptions.processOrigin = [](const ProcessIdentity &) { return ProcessOrigin::kInsideTree; };
+    engineOptions.lookupPathType = [&asked](const std::string &path) {
+        asked.push_back(path);
+        return LookupPathType::kFile;
+    };
+
+    SandboxEngine engine(
+        manifest,
+        &sink,
+        brokerIdentity,
+        "/tmp/bxl-selftest",
+        [](const std::string &) { return true; },
+        engineOptions);
+
+    engine.Start();
+    engine.RegisterRoot(rootIdentity, std::string(kSourceRoot) + "/tool0");
+
+    auto lookupIn = [&](const std::string &parent, const std::string &target) {
+        NormalizedEvent event;
+        event.op = NormOp::kLookup;
+        event.self = rootIdentity;
+        event.parent = brokerIdentity;
+        event.sourcePath = target;
+        event.lookupParentPath = parent;
+        event.sourceTypeKnown = false;
+        event.messageVersion = 8;
+        event.succeeded = true;
+        engine.OnEvent(std::move(event));
+    };
+
+    // A header resolved inside an include directory, then that same directory resolved as a target -
+    // which is what the next component of an ancestor walk looks like.
+    lookupIn("/tmp/bxl-selftest/include", "/tmp/bxl-selftest/include/header.h");
+    lookupIn("/tmp/bxl-selftest", "/tmp/bxl-selftest/include");
+
+    engine.Shutdown();
+    sink.WriteSentinel(ReportSink::kEndOfReportsSentinel);
+    sink.Close();
+    reader.Join();
+
+    Check(std::find(asked.begin(), asked.end(), std::string("/tmp/bxl-selftest/include")) == asked.end(),
+          "a directory already seen as a lookup's parent must never be asked about");
+    Check(asked.size() == 1 && asked[0] == "/tmp/bxl-selftest/include/header.h",
+          "only the target that was never a parent may cost a filesystem call");
+}
+
 int main(int argc, char **argv)
 {
     uint64_t sweepIterations = 100000;
@@ -1110,6 +1187,7 @@ int main(int argc, char **argv)
     TestOnlyAModifyingCloseIsAWrite(manifest.get());
     TestAttestationCanArriveAfterTheConnect(manifest.get());
     TestADirectoryProbeIsNotAFileRead(manifest.get());
+    TestALookupParentCostsNoFilesystemCall(manifest.get());
     TestCleanRunReportsEverything(manifest.get());
     TestRootForkedByBrokerIsTrackedWithoutTaint(manifest.get());
     TestEachFaultIsDetected(manifest.get());

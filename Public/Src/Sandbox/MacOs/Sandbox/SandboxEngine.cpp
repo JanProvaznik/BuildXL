@@ -293,6 +293,15 @@ void SandboxEngine::ProcessEvent(const NormalizedEvent &event)
 
     if (event.op == NormOp::kLookup)
     {
+        // Free knowledge: a lookup happens *in* a directory, so its parent is one whether or not the
+        // target turns out to be. Recording it means an ancestor walk pays the filesystem once per
+        // directory per pip instead of once per component per walk, and a compiler re-resolving the
+        // same include directories hundreds of times pays nothing after the first.
+        if (!event.lookupParentPath.empty() && m_knownDirectories.size() < kMaxKnownDirectories)
+        {
+            m_knownDirectories.insert(event.lookupParentPath);
+        }
+
         NormalizedEvent resolved = event;
         ResolveLookupTarget(resolved);
         AddTaint(m_translator.Translate(resolved, translated));

@@ -203,6 +203,16 @@ struct NormalizedEvent
     bool destinationExists = true;
 
     /**
+     * For a lookup, the directory the name was resolved in.
+     *
+     * Endpoint Security does not say what a lookup found, but it does say where it looked, and that
+     * parent is a directory by construction. Recording it turns the expensive case - walking an
+     * ancestor chain one component at a time - into something the engine already knows the answer
+     * to, without asking the filesystem.
+     */
+    std::string lookupParentPath;
+
+    /**
      * Whether sourceExists/sourceIsDirectory were established by whoever produced this event.
      *
      * Endpoint Security's LOOKUP carries no stat for what it found, so for that one event the fields

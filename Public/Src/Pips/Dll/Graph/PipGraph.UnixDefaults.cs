@@ -137,6 +137,24 @@ namespace BuildXL.Pips.Graph
                     .Concat(IfMacOs(
                         MacPaths.AppleInternal,
                         MacPaths.SystemLibrary,
+                        // Cryptexes postdate this list. Apple now ships parts of the OS - including the
+                        // dyld shared cache - in cryptexes so they can be replaced without a full OS
+                        // update, which means every process reads from them while it is still starting
+                        // up, before it runs a single instruction of the tool. Without these, every pip
+                        // on a current macOS reports undeclared reads of
+                        // /System/Cryptexes/OS, /System/Cryptexes/Rosetta and the shared cache under
+                        // Preboot, which fails the pip and makes it uncacheable.
+                        //
+                        // Both paths are needed: dyld resolves the shared cache through the Preboot
+                        // location, while processes probe the /System/Cryptexes mount points.
+                        //
+                        // Untracking is the right treatment for the same reason it is for /usr/lib: the
+                        // set of OS libraries a process loads is not deterministic across runs, so
+                        // sealing them would make identical builds look different. Note this deliberately
+                        // does not untrack /System wholesale - /System/Volumes/Data is a firmlink to the
+                        // data volume, so that would untrack every user file reached through it.
+                        MacPaths.SystemCryptexes,
+                        MacPaths.PrebootCryptexes,
                         MacPaths.UserPreferences))
                     .Select(p => DirectoryArtifact.CreateWithZeroPartialSealId(pathTable, p))
                     .ToArray();

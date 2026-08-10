@@ -404,6 +404,7 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.op = NormOp::kLookup;
             out.sourcePath = JoinDirAndName(event.lookup.source_dir, event.lookup.relative_target);
             out.sourcePathTruncated = event.lookup.source_dir->path_truncated;
+            out.lookupParentPath = TokenToString(event.lookup.source_dir->path);
 
             // The only event Endpoint Security delivers that names a path without saying what is
             // there: es_event_lookup_t carries a stat for the *parent* directory and nothing for the
