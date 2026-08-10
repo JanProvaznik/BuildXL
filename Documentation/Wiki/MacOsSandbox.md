@@ -422,14 +422,28 @@ this section exists to prevent.
 
 The gate ordering makes the difference concrete. Run unentitled and non-root:
 
-| call | result |
-|---|---|
-| `es_new_client` | `5 ES_NEW_CLIENT_RESULT_ERR_NOT_PRIVILEGED` |
-| `es_new_descendants_client` | `3 ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED` |
+| call | unentitled | entitled |
+|---|---|---|
+| `es_new_client` (system-wide) | `5 ERR_NOT_PRIVILEGED` | **`not privileged`** |
+| `es_new_descendants_client` | `3 ERR_NOT_ENTITLED` | **`success`** |
 
-The descendants client never reaches the root check. That is the one part of Apple's "does NOT
-require root privilege, does NOT require TCC approval" claim that can be verified without holding
-the entitlement, and it holds.
+Both columns are measured as an ordinary user, and together they are the clearest answer to what
+this design actually takes from macOS 27.
+
+The unentitled column shows the descendants client never reaching the root check. The entitled
+column, taken later with the capability in hand, completes it: **the descendants client runs as an
+unprivileged user, and the system-wide client still does not.** Apple's "does NOT require root
+privilege, does NOT require TCC approval" holds, and it holds only for the scoped client.
+
+That is the dependency, stated concretely. Without `es_new_descendants_client` an ES-based sandbox
+must open a *system-wide* client, which means **every build runs as root** — unacceptable for a
+developer machine and for CI alike — and means the sandbox observes every process on the machine,
+including other users' and unrelated applications'. A build tool has no business holding that. The
+descendants client is scoped to the caller's own process subtree, which is exactly what a build
+needs and is also why there is nothing left to escalate: the privilege requirement disappears
+because the capability did.
+
+Reproduce with `bxl-es-broker --probe-es`, which probes both clients and prints both results.
 
 ---
 

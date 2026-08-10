@@ -386,9 +386,51 @@ std::unique_ptr<EventSource> CreateEventSource(
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && std::strcmp(argv[1], "--probe-es") == 0)
+    {
+        // Answers one question - can this machine create an Endpoint Security client - without a
+        // manifest, a report stream or a tool to run. Whether the answer is yes depends on the
+        // signature, the entitlement and the machine's AMFI state together, and the failure modes
+        // are hard to tell apart from a distance: a missing entitlement, an entitlement the kernel
+        // declines to honour, and a broker that was rebuilt but not re-signed all present as "it
+        // does not work". Diagnostics/es-capability.sh reads this.
+#if BXL_ES_SDK_AVAILABLE
+        // Both clients are probed because they do not have the same requirements, and the
+        // difference is the reason this design targets macOS 27. The system-wide client needs root;
+        // the descendants client, new in 26/27, does not - it can only observe the caller's own
+        // process subtree, so there is nothing to escalate. A build that needed root to be observed
+        // would not be shippable.
+        es_client_t *wide = nullptr;
+        const es_new_client_result_t wideResult = es_new_client(&wide, ^(es_client_t *, const es_message_t *) {});
+        if (wideResult == ES_NEW_CLIENT_RESULT_SUCCESS)
+        {
+            es_delete_client(wide);
+        }
+
+        es_client_t *descendants = nullptr;
+        const es_new_client_result_t result =
+            es_new_descendants_client(&descendants, ^(es_client_t *, const es_message_t *) {});
+
+        printf("system-wide client: %s\n", EsIngress::DescribeNewClientResult(wideResult));
+        printf("descendants client: %s\n", EsIngress::DescribeNewClientResult(result));
+
+        if (result == ES_NEW_CLIENT_RESULT_SUCCESS)
+        {
+            es_delete_client(descendants);
+            printf("es client ok\n");
+            return 0;
+        }
+
+        return kBrokerFailureExitCode;
+#else
+        printf("this broker was built without the Endpoint Security SDK\n");
+        return kBrokerFailureExitCode;
+#endif
+    }
+
     if (argc < 2)
     {
-        Fail("usage: bxl-es-broker <tool> [args...]");
+        Fail("usage: bxl-es-broker <tool> [args...]\n       bxl-es-broker --probe-es");
         return kBrokerFailureExitCode;
     }
 

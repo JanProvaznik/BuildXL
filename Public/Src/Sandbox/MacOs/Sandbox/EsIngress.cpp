@@ -51,7 +51,9 @@ inline ProcessIdentity IdentityOf(const audit_token_t &token)
     return identity;
 }
 
-const char *NewClientResultToString(es_new_client_result_t result)
+} // namespace
+
+const char *EsIngress::DescribeNewClientResult(es_new_client_result_t result)
 {
     switch (result)
     {
@@ -65,6 +67,8 @@ const char *NewClientResultToString(es_new_client_result_t result)
         default: return "unrecognized result";
     }
 }
+
+namespace {
 
 #endif // BXL_ES_SDK_AVAILABLE
 
@@ -644,7 +648,7 @@ bool EsIngress::Start(EventHandler handler, std::string &errorMessage)
 
     if (result != ES_NEW_CLIENT_RESULT_SUCCESS)
     {
-        errorMessage = std::string("es_new_descendants_client failed: ") + NewClientResultToString(result);
+        errorMessage = std::string("es_new_descendants_client failed: ") + DescribeNewClientResult(result);
         if (result == ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED)
         {
             errorMessage +=

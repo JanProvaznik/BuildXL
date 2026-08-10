@@ -97,6 +97,11 @@ public:
     /** True when this build of the broker can talk to Endpoint Security at all. */
     static bool IsCompiledIn() { return BXL_ES_SDK_AVAILABLE != 0; }
 
+#if BXL_ES_SDK_AVAILABLE
+    /** Names an es_new_client failure. Exposed so `bxl-es-broker --probe-es` can report it. */
+    static const char *DescribeNewClientResult(es_new_client_result_t result);
+#endif
+
     /** Number of self-generated events dropped before reaching the engine. */
     uint64_t SelfEventsSuppressed() const { return m_selfEventsSuppressed.load(std::memory_order_relaxed); }
 
