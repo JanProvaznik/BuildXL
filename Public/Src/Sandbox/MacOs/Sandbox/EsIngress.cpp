@@ -602,6 +602,11 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             break;
     }
 
+    // Applied once here rather than at each of the 44 assignments above, so a newly modelled event
+    // cannot forget it.
+    CleanPath(out.sourcePath);
+    CleanPath(out.destinationPath);
+
     // Deliberately computed after the switch, on the event's *subject* rather than its actor. FORK
     // rewrites `self` to the child, and the broker forking the pip's root process is precisely the
     // event that must not be suppressed -- suppressing it would leave the process table with no root

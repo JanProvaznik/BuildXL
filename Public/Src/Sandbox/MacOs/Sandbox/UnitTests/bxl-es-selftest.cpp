@@ -806,6 +806,45 @@ static void RunBenchmark(buildxl::common::FileAccessManifest *manifest)
     CheckPerf(eventsPerSecond > 100000, "sustained drain throughput must stay above 100k events/s");
 }
 
+static void TestPathsAreCleanedLexically()
+{
+    // Endpoint Security reports the path the caller supplied, not a resolved one. Measured on a
+    // 61-file clang build: ES reported this path 62 times while the interposition ingress reported
+    // the same 62 accesses with the `..` already gone. The access checker walks the manifest's path
+    // tree, so the uncleaned spelling matches no node and an access inside a declared cone is judged
+    // as if it were outside one - and one file lands in two fingerprint entries.
+    struct Case { const char *input; const char *expected; const char *why; };
+    static const Case cases[] = {
+        {"/Library/Developer/CommandLineTools/usr/bin/../local/lib/clang/workarounds.jsonl",
+         "/Library/Developer/CommandLineTools/usr/local/lib/clang/workarounds.jsonl",
+         "the spelling measured live must collapse to the one the interposer reports"},
+        {"/a/b/c", "/a/b/c", "a clean path must be left exactly as it is"},
+        {"/a/./b", "/a/b", "a dot segment names the directory it sits in"},
+        {"/a//b", "/a/b", "a duplicate separator names the same directory as one"},
+        {"/a/b/../c", "/a/c", "a dot-dot segment must pop the segment before it"},
+        {"/a/b/../../c", "/c", "consecutive dot-dot segments must each pop"},
+        {"/a/b/../../../../d", "/d", "dot-dot must stop at the root rather than run off the front"},
+        {"/..", "/", "dot-dot at the root is the root"},
+        {"/", "/", "the root must survive cleaning"},
+        {"//", "/", "a doubled root is the root"},
+        {"/a/", "/a", "a trailing separator must go: ES reports directory lookups with one"},
+        {"/Library/x/AppleInternal/", "/Library/x/AppleInternal",
+         "the trailing-separator spelling measured live must match the manifest's"},
+        {"/...", "/...", "three dots is an ordinary name, not a dot-dot segment"},
+        {"/a/..b/c", "/a/..b/c", "a name that starts with dot-dot is an ordinary name"},
+        {"/a/b../c", "/a/b../c", "a name that ends with dot-dot is an ordinary name"},
+        {"relative/path", "relative/path", "a relative path cannot be cleaned without a directory"},
+        {"", "", "the empty path must not be turned into the root"},
+    };
+
+    for (const Case &item : cases)
+    {
+        std::string actual = item.input;
+        buildxl::macos::CleanPath(actual);
+        Check(actual == item.expected, item.why);
+    }
+}
+
 int main(int argc, char **argv)
 {
     uint64_t sweepIterations = 100000;
@@ -842,6 +881,7 @@ int main(int argc, char **argv)
 
     const uint64_t start = NowNanos();
 
+    TestPathsAreCleanedLexically();
     TestCleanRunReportsEverything(manifest.get());
     TestRootForkedByBrokerIsTrackedWithoutTaint(manifest.get());
     TestEachFaultIsDetected(manifest.get());

@@ -266,6 +266,29 @@ bool IsDelegation(NormOp op);
  */
 bool IsDelegationEscape(const NormalizedEvent &event);
 
+/**
+ * Removes `.` and `..` segments, duplicate separators and a trailing separator from an absolute
+ * path, in place. Relative paths and paths already clean are left untouched.
+ *
+ * Endpoint Security reports the path a caller supplied rather than a cleaned one, so a LOOKUP can
+ * arrive as `/Library/Developer/CommandLineTools/usr/bin/../local/lib/clang/workarounds.jsonl`.
+ * Measured on a 61-file clang build, that exact path arrives 62 times, while the interposition
+ * ingress reports the same 62 accesses as `/Library/Developer/CommandLineTools/usr/local/...`.
+ *
+ * Two spellings of one file is not cosmetic. The access checker resolves policy by walking the
+ * manifest's path tree, so a path carrying `..` matches no node: an access inside a declared cone
+ * is judged as if it were outside one. It also splits a single file across two fingerprint entries,
+ * so the two backends cannot agree on a cache key for the same build.
+ *
+ * The cleanup is purely lexical, which is deliberate. realpath() would be a syscall on every one of
+ * the ~64,000 events a small build produces, and it would additionally resolve symlinks - moving
+ * the disagreement with the interposer rather than removing it, since the interposer stays lexical
+ * on purpose. Lexical `..` removal is unsound when a component is a symlink, which is the same
+ * trade-off every other BuildXL sandbox already makes, and it matches what the tool itself believes
+ * about the path it passed.
+ */
+void CleanPath(std::string &path);
+
 } // namespace macos
 } // namespace buildxl
 

@@ -3,6 +3,9 @@
 
 #include "NormalizedEvent.h"
 
+#include <cstring>
+#include <vector>
+
 namespace buildxl {
 namespace macos {
 
@@ -140,6 +143,76 @@ bool IsDelegationEscape(const NormalizedEvent &event)
         default:
             return false;
     }
+}
+
+void CleanPath(std::string &path)
+{
+    // Relative paths cannot be cleaned without a working directory, and ES never reports one.
+    if (path.size() < 2 || path[0] != '/')
+    {
+        return;
+    }
+
+    // A trailing separator is checked too: ES reports directory lookups as `.../AppleInternal/`,
+    // and the manifest's tree stores that directory without the separator.
+    if (path.find("/.") == std::string::npos && path.find("//") == std::string::npos &&
+        path.back() != '/')
+    {
+        return;
+    }
+
+    // Offsets of each retained segment's first character, so `..` can pop the previous one.
+    std::vector<size_t> segmentStarts;
+    size_t write = 1;
+
+    for (size_t read = 1; read <= path.size();)
+    {
+        size_t end = path.find('/', read);
+        if (end == std::string::npos)
+        {
+            end = path.size();
+        }
+
+        const size_t length = end - read;
+        if (length == 0)
+        {
+            // A duplicate separator names the same directory as one separator.
+        }
+        else if (length == 1 && path[read] == '.')
+        {
+            // `.` names the directory it sits in.
+        }
+        else if (length == 2 && path[read] == '.' && path[read + 1] == '.')
+        {
+            if (!segmentStarts.empty())
+            {
+                write = segmentStarts.back();
+                segmentStarts.pop_back();
+            }
+            // At the root `..` is the root, so there is nothing to pop and nothing to write.
+        }
+        else
+        {
+            segmentStarts.push_back(write);
+            if (write != read)
+            {
+                std::memmove(&path[write], &path[read], length);
+            }
+
+            write += length;
+            path[write++] = '/';
+        }
+
+        read = end + 1;
+    }
+
+    // Every retained segment wrote a trailing separator; the last one is only wanted for the root.
+    if (write > 1)
+    {
+        --write;
+    }
+
+    path.resize(write);
 }
 
 } // namespace macos
