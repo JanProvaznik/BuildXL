@@ -1984,7 +1984,15 @@ the question that decides whether ES is worth an entitlement at all: **what does
 interposition sandbox that already works and needs no entitlement?**
 
 Both ingresses were run over an identical workload — 61 C files compiled and linked with clang at
-`-j8` — interleaved, load-gated below 4, five repetitions. The two ingresses share everything above
+`-j8` — interleaved, load-gated below 4, five repetitions. Reproduce with
+`Diagnostics/es-compare.sh`, which runs all three arms, and `Diagnostics/es-diff-coverage.py`, which
+diffs what each ingress reported:
+
+```
+TOOLS=/Library/Developer/CommandLineTools/usr/bin
+Diagnostics/es-compare.sh --workdir <dir> --build "$TOOLS/make -j8" --clean "$TOOLS/make clean"
+Diagnostics/es-diff-coverage.py report-interpose.txt report-es.txt --label-a interpose --label-b es
+``` The two ingresses share everything above
 the ingress boundary, so a difference between them is a difference in what the kernel tells them.
 
 ### 16.1 Cost
