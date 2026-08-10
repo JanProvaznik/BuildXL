@@ -102,6 +102,23 @@ TaintReason EventTranslator::Translate(const NormalizedEvent &event, std::vector
         return taint;
     }
 
+    if (IsDelegation(event.op))
+    {
+        if (IsDelegationEscape(event))
+        {
+            taint |= TaintReason::kDelegationEscape;
+            return taint;
+        }
+
+        // A benign delegation still reports its target when that target is a path the manifest
+        // cares about, which is how a UNIX-domain socket connect gets treated as the file access it
+        // is. Anything without a path - a service name - has nothing to report and falls out here.
+        if (event.sourcePath.empty() || event.op != NormOp::kUipcConnect)
+        {
+            return taint;
+        }
+    }
+
     if (IsIgnored(event.op))
     {
         return taint;
@@ -163,6 +180,11 @@ TaintReason EventTranslator::Translate(const NormalizedEvent &event, std::vector
         case NormOp::kGetAttrList:
         case NormOp::kFsGetPath:
         case NormOp::kChdir:
+        // Connecting to a UNIX-domain socket requires the socket file to exist, which is an
+        // observable dependency on the path: a build that behaves one way when a socket is present
+        // and another way when it is absent must not be reused across that difference. It is a
+        // probe rather than a read because a socket has no content to hash.
+        case NormOp::kUipcConnect:
         {
             SandboxEvent sandboxEvent = MakeEvent(event, EventType::kGenericProbe, event.sourcePath, "");
             Finalize(event, sandboxEvent, output);

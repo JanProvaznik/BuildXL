@@ -534,11 +534,56 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.sourcePathTruncated = event.fcntl.target->path_truncated;
             break;
 
-        // Delegation. No path, no dependency - the whole point is that the operation moves work
-        // somewhere the broker cannot see, which the engine turns into a taint.
-        case ES_EVENT_TYPE_NOTIFY_UIPC_CONNECT: out.op = NormOp::kUipcConnect; break;
-        case ES_EVENT_TYPE_NOTIFY_XPC_CONNECT: out.op = NormOp::kXpcConnect; break;
-        case ES_EVENT_TYPE_NOTIFY_BOOTSTRAP_LOOK_UP: out.op = NormOp::kBootstrapLookUp; break;
+        // Delegation. Judged individually rather than as a category: see IsDelegationEscape.
+        case ES_EVENT_TYPE_NOTIFY_UIPC_CONNECT:
+            out.op = NormOp::kUipcConnect;
+            // A UNIX-domain socket connect names a file, so the path is carried like any other and
+            // checked against the manifest rather than being treated as an opaque category.
+            if (event.uipc_connect.file != nullptr)
+            {
+                out.sourcePath = TokenToString(event.uipc_connect.file->path);
+                out.sourcePathTruncated = event.uipc_connect.file->path_truncated;
+                out.delegationTarget = out.sourcePath;
+            }
+            break;
+
+        case ES_EVENT_TYPE_NOTIFY_XPC_CONNECT:
+            out.op = NormOp::kXpcConnect;
+            out.delegationTarget = TokenToString(event.xpc_connect->service_name);
+            // Only the system domain is owned by the operating system; a process can register into
+            // the user and session domains, so a name there proves nothing about who answers.
+            out.delegationTargetIsPlatform =
+                event.xpc_connect->service_domain_type == ES_XPC_DOMAIN_TYPE_SYSTEM &&
+                out.delegationTarget.rfind("com.apple.", 0) == 0;
+            break;
+
+        case ES_EVENT_TYPE_NOTIFY_BOOTSTRAP_LOOK_UP:
+            out.op = NormOp::kBootstrapLookUp;
+            out.delegationTarget = TokenToString(event.bootstrap_look_up->service_name);
+
+            // launchd submits this event on the caller's behalf, so the enclosing message describes
+            // launchd rather than the process that made the call. The header is explicit about it:
+            // "es_message_t.process describes launchd, not the process that called
+            // bootstrap_look_up()". Attributing the event to launchd made it look like traffic from
+            // a process outside the tree - which is exactly what was observed, pid 1 with ppid 0 -
+            // when it in fact belongs to a tracked process.
+            out.self = IdentityOf(event.bootstrap_look_up->instigator_token);
+            if (event.bootstrap_look_up->instigator != nullptr)
+            {
+                out.parent = IdentityOf(event.bootstrap_look_up->instigator->parent_audit_token);
+            }
+
+            // On the PROCESS arm the service is already running and the kernel supplies its identity;
+            // on the JOB arm there is no live process to ask, and launchd would start one. A service
+            // launchd is willing to start on demand is part of the system's own configuration, which
+            // is the same category of trust.
+            out.delegationTargetIsPlatform =
+                event.bootstrap_look_up->target_type == ES_BOOTSTRAP_TARGET_TYPE_PROCESS &&
+                event.bootstrap_look_up->target.process.target != nullptr
+                    ? event.bootstrap_look_up->target.process.target->is_platform_binary
+                    : out.delegationTarget.rfind("com.apple.", 0) == 0;
+            break;
+
         case ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE: out.op = NormOp::kRemoteThreadCreate; break;
         case ES_EVENT_TYPE_NOTIFY_GET_TASK: out.op = NormOp::kGetTask; break;
         case ES_EVENT_TYPE_NOTIFY_TRACE: out.op = NormOp::kTrace; break;

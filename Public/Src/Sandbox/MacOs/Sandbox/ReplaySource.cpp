@@ -249,6 +249,17 @@ void ReplaySource::DeliverCorpus()
             event.op = NormOp::kUnsupported;
         }
 
+        if (m_faults.escapingDelegation && i == injectionIndex)
+        {
+            // A service the operating system does not own: the shape a pip talking to its own
+            // daemon takes, which is the case delegation tracking exists for.
+            event.op = NormOp::kXpcConnect;
+            event.delegationTarget = "com.contoso.buildserver";
+            event.delegationTargetIsPlatform = false;
+            event.sourcePath.clear();
+            event.destinationPath.clear();
+        }
+
         if (m_faults.truncatePath && i == injectionIndex)
         {
             event.sourcePathTruncated = true;
@@ -553,6 +564,49 @@ std::vector<NormalizedEvent> GenerateCorpus(
 
         const Live liveChild{childAfterExec, parent.identity, parent.depth + 1};
         live.push_back(liveChild);
+
+        // Every process on macOS contacts the platform's own services simply to run: a compile of
+        // one C file produced eight such events, to com.apple.logd,
+        // com.apple.system.notification_center, com.apple.system.opendirectoryd.membership and
+        // com.apple.analyticsd. Emitting them unconditionally is what makes "a clean stream produces
+        // no taint" a statement about the real world rather than about a corpus that omits the
+        // single most common event a build generates.
+        {
+            NormalizedEvent lookup;
+            lookup.op = NormOp::kBootstrapLookUp;
+            lookup.self = childAfterExec;
+            lookup.parent = parent.identity;
+            lookup.messageVersion = 8;
+            lookup.delegationTarget = "com.apple.logd";
+            lookup.delegationTargetIsPlatform = true;
+            corpus.push_back(lookup);
+
+            NormalizedEvent connect;
+            connect.op = NormOp::kXpcConnect;
+            connect.self = childAfterExec;
+            connect.parent = parent.identity;
+            connect.messageVersion = 8;
+            connect.delegationTarget = "com.apple.system.notification_center";
+            connect.delegationTargetIsPlatform = true;
+            corpus.push_back(connect);
+
+            // A UNIX-domain socket connect names a file, so it is judged against the manifest like
+            // any other access rather than as a category of operation. Emitted here rather than as
+            // an injected fault because rewriting the operation of an event the corpus had already
+            // recorded made the access unmatchable, and collided with the other faults that rewrite
+            // the operation at the same index - silently replacing a tainting fault with a benign
+            // one, which the sweep caught.
+            NormalizedEvent socket;
+            socket.op = NormOp::kUipcConnect;
+            socket.self = childAfterExec;
+            socket.parent = parent.identity;
+            socket.messageVersion = 8;
+            socket.sourcePath = shape.outputRoot + "/build.sock";
+            socket.delegationTarget = socket.sourcePath;
+            record(socket);
+            corpus.push_back(socket);
+        }
+
         emitAccesses(liveChild);
     }
 

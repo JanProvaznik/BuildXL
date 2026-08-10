@@ -275,6 +275,18 @@ void SandboxEngine::ProcessEvent(const NormalizedEvent &event)
     }
 
     std::vector<SandboxEvent> translated;
+    if (IsDelegation(event.op))
+    {
+        if (IsDelegationEscape(event))
+        {
+            m_stats.delegationEscapes++;
+        }
+        else
+        {
+            m_stats.benignDelegations++;
+        }
+    }
+
     AddTaint(m_translator.Translate(event, translated));
 
     for (SandboxEvent &sandboxEvent : translated)

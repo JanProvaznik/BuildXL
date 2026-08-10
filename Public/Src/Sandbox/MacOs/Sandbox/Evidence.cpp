@@ -114,6 +114,8 @@ void EvidenceWriter::WriteSummary(const EvidenceSummary &summary)
              << ",\"estimatedKernelDrops\":" << summary.estimatedKernelDrops
              << ",\"unmappedLineageEvents\":" << summary.unmappedLineageEvents
              << ",\"foreignProcessEvents\":" << summary.foreignProcessEvents
+             << ",\"benignDelegations\":" << summary.benignDelegations
+             << ",\"delegationEscapes\":" << summary.delegationEscapes
              << ",\"queueHighWaterMark\":" << summary.queueHighWaterMark
              << ",\"queueCapacity\":" << summary.queueCapacity
              << ",\"callbackNanosMax\":" << summary.callbackNanosMax

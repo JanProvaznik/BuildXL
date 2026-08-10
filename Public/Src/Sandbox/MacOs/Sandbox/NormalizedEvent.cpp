@@ -86,11 +86,9 @@ bool IsAlwaysTainting(NormOp op)
 {
     switch (op)
     {
-        // A process handing work to a service outside the descendant domain means the resulting file
-        // accesses are not visible to this client, so the observation set is unsound by construction.
-        case NormOp::kUipcConnect:
-        case NormOp::kXpcConnect:
-        case NormOp::kBootstrapLookUp:
+        // Injecting into, or seizing control of, another process is a genuine escape: the target can
+        // perform filesystem work attributed to nothing the broker is watching. These are rare in a
+        // build - a compile of a C file produces none - so tainting on them costs nothing real.
         case NormOp::kRemoteThreadCreate:
         case NormOp::kGetTask:
         case NormOp::kTrace:
@@ -105,6 +103,40 @@ bool IsAlwaysTainting(NormOp op)
         case NormOp::kSetUid:
         case NormOp::kUnsupported:
             return true;
+        default:
+            return false;
+    }
+}
+
+bool IsDelegation(NormOp op)
+{
+    return op == NormOp::kUipcConnect || op == NormOp::kXpcConnect || op == NormOp::kBootstrapLookUp;
+}
+
+bool IsDelegationEscape(const NormalizedEvent &event)
+{
+    switch (event.op)
+    {
+        // Resolving a service name to a port delegates nothing; it is the macOS equivalent of a DNS
+        // lookup. What matters is what the process then does with the port, and that shows up as an
+        // XPC connect, which is judged on its own. Tainting here would taint every process on the
+        // system, because looking up com.apple.logd is part of starting up.
+        case NormOp::kBootstrapLookUp:
+            return false;
+
+        // A channel to a platform service in the system domain is not an escape this sandbox models,
+        // for the same reason neither Detours nor the Linux sandbox models it. A channel to anything
+        // else may be the pip talking to its own daemon - a compiler server being the case BuildXL
+        // already knows about - and that genuinely can do undeclared work on the pip's behalf.
+        case NormOp::kXpcConnect:
+            return !event.delegationTargetIsPlatform;
+
+        // A UNIX-domain socket connect names a file, so it is judged as a file access against the
+        // manifest like any other rather than as a category. The production Linux sandbox does not
+        // intercept connect() at all, so this is already stricter than the supported Unix platform.
+        case NormOp::kUipcConnect:
+            return false;
+
         default:
             return false;
     }

@@ -48,6 +48,12 @@ struct FaultScript
     /** Emit an operation the translator cannot model. */
     bool unsupportedOperation = false;
 
+    /**
+     * Emit a delegation to a service the operating system does not own - the shape of a pip talking
+     * to its own daemon, which must taint.
+     */
+    bool escapingDelegation = false;
+
     /** Truncate a path so it cannot be matched against the manifest. */
     bool truncatePath = false;
 
@@ -59,8 +65,10 @@ struct FaultScript
 
     bool Any() const
     {
+        // escapingDelegation is listed; the benign delegations are not faults at all and are
+        // emitted by every corpus, because every real macOS process makes them.
         return dropCount > 0 || dropTail || floodQueue || changeEpoch || loseMarker || staleVersion
-            || unmappedLineage || unsupportedOperation || truncatePath || loseExit;
+            || unmappedLineage || unsupportedOperation || truncatePath || loseExit || escapingDelegation;
     }
 };
 

@@ -49,6 +49,17 @@ struct EngineStatistics
      * soundness problem - and makes it visible if the number ever stops being small.
      */
     uint64_t foreignProcessEvents = 0;
+
+    /**
+     * Delegation events judged not to put the observation set at risk, and those judged to.
+     *
+     * Both are recorded because the decision is a policy judgement rather than a fact, and a policy
+     * that silently absorbs everything is indistinguishable from one that works. If the benign count
+     * is large and the escape count is zero on every build, that is the expected shape; if escapes
+     * start appearing, the target names are what makes them diagnosable.
+     */
+    uint64_t benignDelegations = 0;
+    uint64_t delegationEscapes = 0;
     size_t queueHighWaterMark = 0;
 
     /** Enqueues that had to wait for the drain thread, and the total time spent waiting. */

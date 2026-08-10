@@ -500,6 +500,56 @@ static void TestSuppressedSelfEventsAreNotMistakenForDrops(buildxl::common::File
     Check(tracker.EstimatedDroppedMessages() == 1, "exactly the unexplained messages count as drops");
 }
 
+static void TestPlatformServiceContactIsNotAnEscape(buildxl::common::FileAccessManifest *manifest)
+{
+    printf("[delegation classification]\n");
+
+    // Every process on macOS contacts the platform's own services simply to run. Measured with
+    // es-delegation.c, compiling one C file produces nine delegation events and every one of them
+    // is a platform binary reaching com.apple.logd, com.apple.system.notification_center,
+    // com.apple.system.opendirectoryd.membership or com.apple.analyticsd.
+    //
+    // Treating those as escapes made a real compile uncacheable, which is the same as having no
+    // sandbox at all: the corpus now emits them on every process, so this is really a statement
+    // that the whole suite runs against a stream shaped like the kernel's.
+    ScenarioOptions benign;
+    benign.shape.processCount = 10;
+    benign.shape.accessesPerProcess = 20;
+    benign.shape.seed = 4404;
+
+    const ScenarioResult platform = RunScenario(benign, manifest);
+    ReportScenario("contact with platform services", platform);
+
+    Check(!HasTaint(platform.taint, TaintReason::kDelegationEscape),
+          "contacting a platform service must not taint the pip");
+    Check(platform.stats.benignDelegations > 0,
+          "a benign delegation must be counted, not silently dropped");
+    Check(platform.stats.delegationEscapes == 0,
+          "contacting a platform service is not an escape");
+
+    // The case delegation tracking exists for: a pip handing work to a service the build itself
+    // runs, a compiler server being the example BuildXL already has a switch for. Without this the
+    // narrowing above would be indistinguishable from deleting the check.
+    ScenarioOptions escaping = benign;
+    escaping.faults.escapingDelegation = true;
+    escaping.faults.seed = 29;
+
+    const ScenarioResult escape = RunScenario(escaping, manifest);
+    ReportScenario("contact with a service the build runs", escape);
+
+    Check(HasTaint(escape.taint, TaintReason::kDelegationEscape),
+          "handing work to a service outside the platform must taint the pip");
+    Check(escape.stats.delegationEscapes > 0,
+          "a delegation escape must be counted");
+
+    // A UNIX-domain socket connect names a file, so it is judged against the manifest like any
+    // other access. The corpus emits one per process, so the clean scenario above already proves it
+    // neither taints nor goes missing - the production Linux sandbox does not intercept connect()
+    // at all, so ignoring it would still be parity, but reporting it is strictly better.
+    Check(platform.missingCount == 0,
+          "a unix-domain socket connect must be reported as an access on its path");
+}
+
 static void TestForeignProcessEventsAreNotThePipsProblem(buildxl::common::FileAccessManifest *manifest)
 {
     printf("[foreign process events]\n");
@@ -641,6 +691,7 @@ static void TestNoSilentSkipUnderRandomFaults(buildxl::common::FileAccessManifes
         faults.unsupportedOperation = ((seed >> 15) % 29) == 0;
         faults.truncatePath = ((seed >> 17) % 31) == 0;
         faults.loseExit = ((seed >> 19) % 37) == 0;
+        faults.escapingDelegation = ((seed >> 23) % 43) == 0;
         options.faults = faults;
         options.supervisionQuiesced = ((seed >> 21) % 41) != 0;
 
@@ -657,10 +708,11 @@ static void TestNoSilentSkipUnderRandomFaults(buildxl::common::FileAccessManifes
                 {
                     fprintf(stderr,
                             "FAIL: undetected fault at iteration %" PRIu64
-                            " (drop=%u tail=%d epoch=%d marker=%d version=%d lineage=%d op=%d trunc=%d exit=%d quiesced=%d)\n",
+                            " (drop=%u tail=%d epoch=%d marker=%d version=%d lineage=%d op=%d trunc=%d exit=%d escape=%d quiesced=%d)\n",
                             i, faults.dropCount, faults.dropTail, faults.changeEpoch, faults.loseMarker,
                             faults.staleVersion, faults.unmappedLineage, faults.unsupportedOperation,
-                            faults.truncatePath, faults.loseExit, options.supervisionQuiesced);
+                            faults.truncatePath, faults.loseExit, faults.escapingDelegation,
+                            options.supervisionQuiesced);
                 }
             }
         }
@@ -796,6 +848,7 @@ int main(int argc, char **argv)
     TestNewerMessageVersionWarnsButDoesNotFail(manifest.get());
     TestSuppressedSelfEventsAreNotMistakenForDrops(manifest.get());
     TestForeignProcessEventsAreNotThePipsProblem(manifest.get());
+    TestPlatformServiceContactIsNotAnEscape(manifest.get());
     TestQueueOverflowIsDetected(manifest.get());
     TestBackpressureAvoidsLoss(manifest.get());
     TestNoSilentSkipUnderRandomFaults(manifest.get(), sweepIterations);

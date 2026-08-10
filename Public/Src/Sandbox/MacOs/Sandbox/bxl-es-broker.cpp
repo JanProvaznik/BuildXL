@@ -652,6 +652,8 @@ int main(int argc, char **argv)
             summary.estimatedKernelDrops = stats.estimatedKernelDrops;
             summary.unmappedLineageEvents = stats.unmappedLineageEvents;
             summary.foreignProcessEvents = stats.foreignProcessEvents;
+            summary.benignDelegations = stats.benignDelegations;
+            summary.delegationEscapes = stats.delegationEscapes;
             summary.queueHighWaterMark = stats.queueHighWaterMark;
             summary.queueCapacity = EngineOptions().queueCapacity;
             summary.callbackNanosMax = stats.callbackNanosMax;

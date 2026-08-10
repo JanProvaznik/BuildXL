@@ -212,6 +212,35 @@ struct NormalizedEvent
     /** Populated for kExec only. */
     std::string commandLine;
 
+    /**
+     * For a delegation event, what the process was trying to reach: an XPC or bootstrap service
+     * name, or the path of a UNIX-domain socket. Empty on every other event.
+     *
+     * Recorded because the decision about whether a delegation is an escape cannot be made from the
+     * operation alone. Every process on macOS contacts system services simply to run - a compile of
+     * one C file produces nine delegation events, all of them to com.apple.logd,
+     * com.apple.system.notification_center, com.apple.system.opendirectoryd.membership and
+     * com.apple.analyticsd. Treating those as escapes makes every macOS pip uncacheable, which is
+     * the same as having no sandbox at all.
+     */
+    std::string delegationTarget;
+
+    /**
+     * True when the delegation target is a service the operating system owns.
+     *
+     * The soundness worry behind delegation is that a pip asks a service outside the descendant
+     * domain to touch the filesystem on its behalf, so the observation set is incomplete. That worry
+     * is real for a service the build itself runs - a compiler server is the canonical example - and
+     * it is why BuildXL has an explicit switch for shared compilation. It is not real for the
+     * platform's own daemons, whose filesystem effects are confined to system locations no build
+     * declares and do not vary with build content.
+     *
+     * Note the production Linux sandbox does not intercept connect() at all and Detours does not
+     * model IPC either, so treating platform-service contact as an escape would make macOS strictly
+     * stricter than both supported platforms, at the cost of never caching anything.
+     */
+    bool delegationTargetIsPlatform = false;
+
     /** True when the broker itself instigated this event (fence markers, self-reads). */
     bool fromBroker = false;
 
@@ -224,6 +253,18 @@ bool IsRelevantForDependencies(NormOp op);
 
 /** True for operations that always mark the pip non-cacheable. */
 bool IsAlwaysTainting(NormOp op);
+
+/** True for the three operations that hand work to something outside the descendant domain. */
+bool IsDelegation(NormOp op);
+
+/**
+ * Decides whether a delegation event actually puts the pip's observation set at risk.
+ *
+ * Judged per event rather than per operation, because the operation alone does not carry enough
+ * information: contacting com.apple.logd and contacting a build's own compiler server are the same
+ * operation with entirely different consequences.
+ */
+bool IsDelegationEscape(const NormalizedEvent &event);
 
 } // namespace macos
 } // namespace buildxl

@@ -48,6 +48,8 @@ struct EvidenceSummary
     uint64_t estimatedKernelDrops = 0;
     uint64_t unmappedLineageEvents = 0;
     uint64_t foreignProcessEvents = 0;
+    uint64_t benignDelegations = 0;
+    uint64_t delegationEscapes = 0;
     uint64_t queueHighWaterMark = 0;
     uint64_t queueCapacity = 0;
     uint64_t callbackNanosMax = 0;
