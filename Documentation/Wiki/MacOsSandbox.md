@@ -269,10 +269,27 @@ grants this routinely to build and security tooling. On approval, add the entitl
 regenerate and install the provisioning profile, and sign the broker with a Developer ID Application
 certificate. `es-check.sh` then reports "properly entitled" and the probe passes.
 
-**Route B, relax AMFI locally (fastest real measurement, not for CI).** In Recovery: Startup
-Security Utility → Reduced Security, then `csrutil disable`. After rebooting,
-`sudo nvram boot-args=amfi_get_out_of_my_way=0x1` and reboot again. An ad-hoc signature carrying the
-entitlement is then accepted. This lowers the security of the machine, so it has to be a machine you
+**Route B, relax AMFI locally (fastest real measurement, not for CI).** On Apple silicon the order
+matters, because `boot-args` is itself protected by SIP — setting it before SIP is off silently
+fails:
+
+1. Shut down. Press and **hold** the power button until *Loading startup options* appears, then
+   **Options → Continue**. With FileVault on, pick an admin user and enter the password to unlock
+   the volume.
+2. **Utilities → Startup Security Utility**, select the system disk, **Security Policy… → Reduced
+   Security**, authenticate.
+3. **Utilities → Terminal**, run `csrutil disable`, confirm, authenticate. On Apple silicon this
+   moves the policy to Permissive Security.
+4. Restart and log in normally.
+5. `sudo nvram boot-args=amfi_get_out_of_my_way=0x1` — this is the step that needs SIP already off.
+6. Restart again.
+7. Verify with `csrutil status` (disabled), `nvram boot-args` (set), then run `es-check.sh`.
+
+An ad-hoc signature carrying the entitlement is accepted from that point on.
+
+To revert: `sudo nvram -d boot-args`, then in Recovery `csrutil enable` and set the Security Policy
+back to **Full Security**. FileVault is unaffected throughout. A macOS update may reset the policy on
+its own, so re-check after one. This lowers the security of the machine, so it has to be a machine you
 are willing to compromise — and it has to be running macOS 27, which rules out the obvious
 workaround. A VM is **not** a shortcut here: `VZMacOSRestoreImage.fetchLatestSupported` returns
 macOS 26.6.1, the newest publicly fetchable image, and 26.x contains no `es_new_descendants_client`
