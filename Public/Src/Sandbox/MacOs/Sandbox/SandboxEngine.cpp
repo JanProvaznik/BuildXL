@@ -5,6 +5,7 @@
 
 #include "SandboxEngine.h"
 
+#include <libproc.h>
 #include <unistd.h>
 
 namespace buildxl {
@@ -49,6 +50,54 @@ SandboxEngine::SandboxEngine(
     {
         m_processes.AddSyntheticAncestor(brokerIdentity, "bxl-es-broker");
     }
+
+    m_processOrigin = m_options.processOrigin;
+    if (!m_processOrigin)
+    {
+        m_processOrigin = [brokerIdentity](const ProcessIdentity &identity) {
+            return ProbeProcessOrigin(identity, brokerIdentity);
+        };
+    }
+}
+
+ProcessOrigin ProbeProcessOrigin(const ProcessIdentity &identity, const ProcessIdentity &root)
+{
+    if (!identity.IsValid() || !root.IsValid())
+    {
+        return ProcessOrigin::kUnknown;
+    }
+
+    pid_t current = static_cast<pid_t>(identity.pid);
+
+    // Bounded so that a cycle introduced by pid reuse during the walk cannot spin. Real ancestries
+    // are a handful of levels deep; anything past this is not a tree the broker can reason about.
+    for (int hops = 0; hops < 64; hops++)
+    {
+        if (current == static_cast<pid_t>(root.pid))
+        {
+            return ProcessOrigin::kInsideTree;
+        }
+
+        if (current <= 1)
+        {
+            // launchd, or a process reparented to it. Either way it is outside the pip.
+            return ProcessOrigin::kOutsideTree;
+        }
+
+        struct proc_bsdinfo info;
+        const int read = proc_pidinfo(current, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+        if (read != static_cast<int>(sizeof(info)))
+        {
+            // The process is gone, so its ancestry cannot be established. Reported as unknown rather
+            // than assumed, because assuming "outside" here would silently discard the accesses of a
+            // short-lived process that really was ours.
+            return ProcessOrigin::kUnknown;
+        }
+
+        current = static_cast<pid_t>(info.pbi_ppid);
+    }
+
+    return ProcessOrigin::kUnknown;
 }
 
 SandboxEngine::~SandboxEngine()
@@ -189,11 +238,32 @@ void SandboxEngine::ProcessEvent(const NormalizedEvent &event)
             break;
     }
 
-    const TaintReason lineageTaint = m_processes.ValidateLineage(event);
-    if (IsTainted(lineageTaint))
+    if (!m_processes.IsTracked(event.self))
     {
+        // An event from a process the broker has no record of. There are two very different reasons
+        // that happens, and they call for opposite responses.
+        //
+        // Endpoint Security does deliver events to a descendants client whose acting process is not
+        // a descendant: measured on macOS 27, a bootstrap lookup arrives with launchd as its actor,
+        // because launchd performs the lookup itself rather than the process that asked for it.
+        // Attributing that to the pip was wrong twice over - it reported launchd's activity as a pip
+        // dependency, and it raised a delegation-escape taint for something the pip never did.
+        //
+        // The other reason is a process that really is in the tree whose FORK was never seen, which
+        // is a genuine soundness failure. Guessing between them is not good enough, so the origin is
+        // established directly, and anything that cannot be established counts as unsound.
+        const ProcessOrigin origin = m_processOrigin(event.self);
+        if (origin == ProcessOrigin::kOutsideTree)
+        {
+            m_stats.foreignProcessEvents++;
+            m_stats.eventsProcessed++;
+            return;
+        }
+
         m_stats.unmappedLineageEvents++;
-        AddTaint(lineageTaint);
+        AddTaint(TaintReason::kUnmappedLineage);
+        m_stats.eventsProcessed++;
+        return;
     }
 
     if (m_processes.IsBreakaway(event.self) && event.op != NormOp::kExit)

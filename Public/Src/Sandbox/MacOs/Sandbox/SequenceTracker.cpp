@@ -50,9 +50,13 @@ TaintReason SequenceTracker::Observe(const NormalizedEvent &event)
 
     if (m_observedCount > 0 && event.messageVersion >= kMinimumSupportedMessageVersion)
     {
-        if (event.globalSequence > m_lastGlobalSequence + 1)
+        // Messages the ingress withheld still consumed sequence numbers, so the first sequence this
+        // event could legitimately carry is one past them. Anything beyond that is a real drop.
+        const uint64_t expected = m_lastGlobalSequence + 1 + event.suppressedBeforeGlobal;
+
+        if (event.globalSequence > expected)
         {
-            m_estimatedDrops += event.globalSequence - m_lastGlobalSequence - 1;
+            m_estimatedDrops += event.globalSequence - expected;
             m_gapCount++;
             taint |= TaintReason::kKernelSequenceGap;
         }
@@ -63,16 +67,22 @@ TaintReason SequenceTracker::Observe(const NormalizedEvent &event)
             m_gapCount++;
             taint |= TaintReason::kKernelSequenceGap;
         }
+
+        m_suppressedAccountedFor += event.suppressedBeforeGlobal;
     }
 
     // Independent per-event-type cross-check.
     const uint16_t typeKey = static_cast<uint16_t>(event.op);
     auto lastForType = m_lastTypeSequence.find(typeKey);
-    if (lastForType != m_lastTypeSequence.end() && event.typeSequence > lastForType->second + 1)
+    if (lastForType != m_lastTypeSequence.end())
     {
-        m_estimatedDrops += event.typeSequence - lastForType->second - 1;
-        m_gapCount++;
-        taint |= TaintReason::kKernelSequenceGap;
+        const uint64_t expectedForType = lastForType->second + 1 + event.suppressedBeforeType;
+        if (event.typeSequence > expectedForType)
+        {
+            m_estimatedDrops += event.typeSequence - expectedForType;
+            m_gapCount++;
+            taint |= TaintReason::kKernelSequenceGap;
+        }
     }
 
     m_lastTypeSequence[typeKey] = event.typeSequence;

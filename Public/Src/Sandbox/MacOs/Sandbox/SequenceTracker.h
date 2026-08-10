@@ -77,6 +77,14 @@ public:
     uint64_t UserSpaceSequencedCount() const { return m_userSpaceSequencedCount; }
 
     /**
+     * Messages the ingress withheld that were accounted for rather than counted as drops.
+     *
+     * Reported in the evidence so that "no gaps" can be distinguished from "gaps explained away":
+     * if this number is implausible relative to ObservedCount(), the suppression rule is wrong.
+     */
+    uint64_t SuppressedAccountedFor() const { return m_suppressedAccountedFor; }
+
+    /**
      * Resets the per-epoch state. The caller is responsible for having already tainted the pip;
      * this only makes subsequent gap detection meaningful again.
      */
@@ -91,6 +99,7 @@ private:
     uint64_t m_currentEpoch = 0;
     uint64_t m_newerVersionCount = 0;
     uint64_t m_userSpaceSequencedCount = 0;
+    uint64_t m_suppressedAccountedFor = 0;
     bool m_epochInitialized = false;
 };
 

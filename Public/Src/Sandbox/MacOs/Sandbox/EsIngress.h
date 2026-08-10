@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "EventSource.h"
@@ -121,6 +122,13 @@ private:
     std::string m_noncePath;
     mutable std::atomic<uint64_t> m_selfEventsSuppressed{0};
     mutable std::atomic<uint64_t> m_unmappedEvents{0};
+
+    // Suppressed-message accounting for SequenceTracker. Only ever touched from the Endpoint
+    // Security handler block, which runs on a serial queue, so plain members are correct here and
+    // atomics would only obscure that.
+    uint64_t m_suppressedSinceForward = 0;
+    std::unordered_map<uint16_t, uint64_t> m_suppressedSinceForwardByType;
+
     std::atomic<bool> m_running{false};
 };
 

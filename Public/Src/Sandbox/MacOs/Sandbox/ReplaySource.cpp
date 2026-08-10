@@ -533,9 +533,17 @@ std::vector<NormalizedEvent> GenerateCorpus(
         fork.sourcePath = shape.sourceRoot + "/tool" + std::to_string(i % 5);
         corpus.push_back(fork);
 
+        // macOS renumbers a process when it execs: its pidversion changes, so every message after
+        // the exec carries a different identity from the one the FORK announced. Modelling that here
+        // rather than reusing one identity for the process's whole life is what makes the corpus
+        // resemble the kernel. It did not, and as a result a defect that made every real process
+        // untrackable from its exec onward passed 100,000 replayed scenarios without a mark.
+        const ProcessIdentity childAfterExec{child.pid, nextVersion++};
+
         NormalizedEvent exec;
         exec.op = NormOp::kExec;
-        exec.self = child;
+        exec.self = childAfterExec;
+        exec.identityBeforeExec = child;
         exec.parent = parent.identity;
         exec.messageVersion = 8;
         exec.sourcePath = shape.sourceRoot + "/tool" + std::to_string(i % 5);
@@ -543,7 +551,7 @@ std::vector<NormalizedEvent> GenerateCorpus(
         record(exec);
         corpus.push_back(exec);
 
-        const Live liveChild{child, parent.identity, parent.depth + 1};
+        const Live liveChild{childAfterExec, parent.identity, parent.depth + 1};
         live.push_back(liveChild);
         emitAccesses(liveChild);
     }

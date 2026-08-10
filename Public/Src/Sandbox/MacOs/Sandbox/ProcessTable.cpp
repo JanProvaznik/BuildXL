@@ -41,7 +41,7 @@ void ProcessTable::AddSyntheticAncestor(const ProcessIdentity &identity, const s
 TaintReason ProcessTable::HandleFork(const NormalizedEvent &event)
 {
     // On a fork event, 'self' is the child and 'parent' is the process that called fork.
-    if (!event.parent.IsValid() || m_processes.find(event.parent) == m_processes.end())
+    if (!event.parent.IsValid() || TryGet(event.parent) == nullptr)
     {
         m_unmapped.insert(event.self);
         return TaintReason::kUnmappedLineage;
@@ -72,6 +72,35 @@ TaintReason ProcessTable::HandleFork(const NormalizedEvent &event)
 
 TaintReason ProcessTable::HandleExec(const NormalizedEvent &event, bool isBreakaway)
 {
+    // A process is renumbered when it execs, so the entry to update is filed under the identity it
+    // had before. Re-keying it here is what keeps the tree connected; without it, every process
+    // that execs - which is every process a build runs - would look untracked from its exec onward.
+    if (event.identityBeforeExec.IsValid() && event.identityBeforeExec != event.self)
+    {
+        auto previous = m_processes.find(event.identityBeforeExec);
+        if (previous != m_processes.end())
+        {
+            TrackedProcess renamed = previous->second;
+            renamed.identity = event.self;
+            m_processes.erase(previous);
+
+            // The pre-exec identity is retained so that a later message still carrying it - the
+            // ordering between an exec and a straggling message from the same process is the
+            // kernel's to choose, not ours - resolves to the same process rather than looking like
+            // a lost fork.
+            m_execPredecessors[event.identityBeforeExec] = event.self;
+
+            auto inserted = m_processes.emplace(event.self, renamed);
+            if (!inserted.second)
+            {
+                // The identity is already taken. Rather than merge two processes into one entry,
+                // which would silently lose one of them, this is reported.
+                m_unmapped.insert(event.self);
+                return TaintReason::kUnmappedLineage;
+            }
+        }
+    }
+
     TrackedProcess *process = TryGetMutable(event.self);
     if (process == nullptr)
     {
@@ -110,20 +139,9 @@ TaintReason ProcessTable::HandleExit(const NormalizedEvent &event)
     return TaintReason::kNone;
 }
 
-TaintReason ProcessTable::ValidateLineage(const NormalizedEvent &event) const
-{
-    if (m_processes.find(event.self) != m_processes.end())
-    {
-        return TaintReason::kNone;
-    }
-
-    m_unmapped.insert(event.self);
-    return TaintReason::kUnmappedLineage;
-}
-
 bool ProcessTable::IsTracked(const ProcessIdentity &identity) const
 {
-    return m_processes.find(identity) != m_processes.end();
+    return TryGet(identity) != nullptr;
 }
 
 bool ProcessTable::IsBreakaway(const ProcessIdentity &identity) const
@@ -134,14 +152,43 @@ bool ProcessTable::IsBreakaway(const ProcessIdentity &identity) const
 
 const TrackedProcess *ProcessTable::TryGet(const ProcessIdentity &identity) const
 {
-    auto found = m_processes.find(identity);
+    auto found = m_processes.find(Resolve(identity));
     return found == m_processes.end() ? nullptr : &found->second;
 }
 
 TrackedProcess *ProcessTable::TryGetMutable(const ProcessIdentity &identity)
 {
-    auto found = m_processes.find(identity);
+    auto found = m_processes.find(Resolve(identity));
     return found == m_processes.end() ? nullptr : &found->second;
+}
+
+ProcessIdentity ProcessTable::Resolve(const ProcessIdentity &identity) const
+{
+    if (m_processes.find(identity) != m_processes.end())
+    {
+        return identity;
+    }
+
+    // Follows the renames recorded at exec. Bounded so that a corrupt chain cannot spin: a process
+    // that execs more than this many times in one pip is not a case worth serving, and the fallback
+    // is to report it as untracked, which is the safe answer.
+    ProcessIdentity current = identity;
+    for (int hops = 0; hops < 32; hops++)
+    {
+        auto renamed = m_execPredecessors.find(current);
+        if (renamed == m_execPredecessors.end())
+        {
+            return identity;
+        }
+
+        current = renamed->second;
+        if (m_processes.find(current) != m_processes.end())
+        {
+            return current;
+        }
+    }
+
+    return identity;
 }
 
 std::vector<ProcessIdentity> ProcessTable::LiveProcesses() const

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -39,6 +40,15 @@ struct EngineStatistics
     uint64_t sequenceGaps = 0;
     uint64_t estimatedKernelDrops = 0;
     uint64_t unmappedLineageEvents = 0;
+
+    /**
+     * Events discarded because their acting process was established to be outside the pip's tree.
+     *
+     * Not a fault. Endpoint Security delivers some events to a descendants client whose actor is
+     * not a descendant, and counting them separately is what keeps that from being mistaken for a
+     * soundness problem - and makes it visible if the number ever stops being small.
+     */
+    uint64_t foreignProcessEvents = 0;
     size_t queueHighWaterMark = 0;
 
     /** Enqueues that had to wait for the drain thread, and the total time spent waiting. */
@@ -54,6 +64,27 @@ struct EngineStatistics
 };
 
 /** Configuration for one pip's broker instance. */
+/**
+ * Where a process sits relative to the pip's process tree.
+ *
+ * kUnknown is a real answer, not a placeholder: a process that has already exited cannot have its
+ * ancestry walked, and the engine treats that as unsound rather than assuming either way.
+ */
+enum class ProcessOrigin
+{
+    kUnknown,
+    kInsideTree,
+    kOutsideTree,
+};
+
+/**
+ * Walks a process's live ancestry to decide whether it descends from `root`.
+ *
+ * Only consulted for processes the broker has no record of, which on a healthy build is a handful
+ * of events for the whole pip, so the cost of asking the kernel does not appear in the hot path.
+ */
+ProcessOrigin ProbeProcessOrigin(const ProcessIdentity &identity, const ProcessIdentity &root);
+
 struct EngineOptions
 {
     /**
@@ -82,7 +113,16 @@ struct EngineOptions
 
     /** Keep at most this many callback-duration samples for percentile reporting. */
     size_t maxLatencySamples = 1 << 20;
+
+    /**
+     * Decides whether a process the broker has no record of belongs to the pip's tree.
+     *
+     * Injected so the engine stays testable without live processes. When left empty the engine
+     * installs the live implementation, which walks the process's ancestry and stops at the broker.
+     */
+    std::function<ProcessOrigin(const ProcessIdentity &)> processOrigin;
 };
+
 
 /**
  * The protocol engine.
@@ -169,6 +209,7 @@ private:
     EventTranslator m_translator;
     SequenceTracker m_sequence;
     ProcessTable m_processes;
+    std::function<ProcessOrigin(const ProcessIdentity &)> m_processOrigin;
     FenceProtocol m_fence;
     BoundedQueue<NormalizedEvent> m_queue;
 

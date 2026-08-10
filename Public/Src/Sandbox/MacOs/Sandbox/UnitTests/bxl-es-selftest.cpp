@@ -31,6 +31,7 @@
 #include "ReportReader.h"
 #include "ReportSink.h"
 #include "SandboxEngine.h"
+#include "SequenceTracker.h"
 
 using namespace buildxl::macos;
 using namespace buildxl::macos::testing;
@@ -47,6 +48,16 @@ struct ScenarioOptions
     EngineOptions engine;
     bool supervisionQuiesced = true;
     bool registerRoot = true;
+
+    /**
+     * What the engine should conclude about a process it has no record of.
+     *
+     * The replay corpus invents its process identities, so asking the real kernel about them would
+     * make the outcome depend on whatever happens to be running on the machine. Every scenario
+     * therefore states the answer. kInsideTree is the default because that is what the corpus
+     * models: a process the broker lost track of is one of the pip's own.
+     */
+    ProcessOrigin untrackedProcessOrigin = ProcessOrigin::kInsideTree;
 
     /**
      * Models what actually happens in production: the broker forks the pip's root process, so the
@@ -140,13 +151,17 @@ ScenarioResult RunScenario(const ScenarioOptions &options, buildxl::common::File
 
     ReplaySource source(std::move(corpus), options.faults, brokerIdentity);
 
+    EngineOptions engineOptions = options.engine;
+    const ProcessOrigin untrackedOrigin = options.untrackedProcessOrigin;
+    engineOptions.processOrigin = [untrackedOrigin](const ProcessIdentity &) { return untrackedOrigin; };
+
     SandboxEngine engine(
         manifest,
         &sink,
         brokerIdentity,
         "/tmp/bxl-selftest",
         [&source](const std::string &noncePath) { return source.EmitMarker(noncePath); },
-        options.engine);
+        engineOptions);
 
     engine.Start();
 
@@ -436,6 +451,111 @@ static void TestNewerMessageVersionWarnsButDoesNotFail(buildxl::common::FileAcce
     Check(result.missingCount == 0, "a newer ES message version must not lose accesses");
 }
 
+static void TestSuppressedSelfEventsAreNotMistakenForDrops(buildxl::common::FileAccessManifest *manifest)
+{
+    (void)manifest;
+    printf("[suppressed self events]\n");
+
+    // A descendants client reports the broker's own syscalls, and the broker writes a report for
+    // every event it forwards, so those messages have to be withheld or the stream feeds back
+    // without bound. The kernel spends their sequence numbers regardless. This is the unit-level
+    // statement of that: withheld messages are declared, and a declared withholding is not a drop.
+    //
+    // The regression this pins down was found by running against the real kernel, not here: the
+    // replay corpus contains no broker self-traffic, so every sequence it produces is already
+    // contiguous and the bug was invisible.
+    SequenceTracker tracker;
+
+    NormalizedEvent first;
+    first.op = NormOp::kOpen;
+    first.messageVersion = SequenceTracker::kMinimumSupportedMessageVersion;
+    first.globalSequence = 1;
+    first.typeSequence = 1;
+    Check(tracker.Observe(first) == TaintReason::kNone, "the first event must not taint");
+
+    // Four messages withheld, so the next event legitimately carries global sequence 6.
+    NormalizedEvent afterSuppression;
+    afterSuppression.op = NormOp::kOpen;
+    afterSuppression.messageVersion = SequenceTracker::kMinimumSupportedMessageVersion;
+    afterSuppression.globalSequence = 6;
+    afterSuppression.typeSequence = 4;
+    afterSuppression.suppressedBeforeGlobal = 4;
+    afterSuppression.suppressedBeforeType = 2;
+    Check(tracker.Observe(afterSuppression) == TaintReason::kNone,
+          "declared suppression must not be reported as a kernel drop");
+    Check(tracker.EstimatedDroppedMessages() == 0, "declared suppression must not count as a drop");
+    Check(tracker.GapCount() == 0, "declared suppression must not count as a gap");
+    Check(tracker.SuppressedAccountedFor() == 4, "suppressed messages must be reported in the evidence");
+
+    // One more than was declared is a real drop and must still be caught.
+    NormalizedEvent realDrop;
+    realDrop.op = NormOp::kOpen;
+    realDrop.messageVersion = SequenceTracker::kMinimumSupportedMessageVersion;
+    realDrop.globalSequence = 9;
+    realDrop.typeSequence = 5;
+    realDrop.suppressedBeforeGlobal = 1;
+    realDrop.suppressedBeforeType = 0;
+    Check(IsTainted(tracker.Observe(realDrop)),
+          "a gap wider than the declared suppression must still taint");
+    Check(tracker.EstimatedDroppedMessages() == 1, "exactly the unexplained messages count as drops");
+}
+
+static void TestForeignProcessEventsAreNotThePipsProblem(buildxl::common::FileAccessManifest *manifest)
+{
+    printf("[foreign process events]\n");
+
+    // Endpoint Security delivers some events to a descendants client whose acting process is not a
+    // descendant. Measured on macOS 27 with es-identity.c: a bootstrap lookup arrives with launchd
+    // as its actor, because launchd performs the lookup rather than the process that asked for it.
+    //
+    // Charging that to the pip was wrong in both directions - launchd's activity was reported as a
+    // pip dependency, and it raised a taint for something the pip never did. What separates it from
+    // a genuinely lost process is where the actor sits relative to the tree, so that is what the
+    // engine asks, and this pins down both answers.
+    ScenarioOptions foreign;
+    foreign.shape.processCount = 10;
+    foreign.shape.accessesPerProcess = 20;
+    foreign.shape.seed = 8123;
+    foreign.faults.unmappedLineage = true;
+    foreign.faults.seed = 11;
+    foreign.untrackedProcessOrigin = ProcessOrigin::kOutsideTree;
+
+    const ScenarioResult outside = RunScenario(foreign, manifest);
+    ReportScenario("event from a process outside the tree", outside);
+
+    Check(!HasTaint(outside.taint, TaintReason::kUnmappedLineage),
+          "an event from outside the pip's tree must not taint the pip");
+    Check(outside.stats.foreignProcessEvents > 0,
+          "an event from outside the pip's tree must be counted, not silently dropped");
+    Check(outside.stats.unmappedLineageEvents == 0,
+          "an event from outside the pip's tree is not unmapped lineage");
+
+    // The same injected fault, with the actor established to be inside the tree, is a lost process
+    // and must still be caught. Without this the fix above would be indistinguishable from deleting
+    // the check.
+    ScenarioOptions inside = foreign;
+    inside.untrackedProcessOrigin = ProcessOrigin::kInsideTree;
+
+    const ScenarioResult within = RunScenario(inside, manifest);
+    ReportScenario("event from a lost process inside the tree", within);
+
+    Check(HasTaint(within.taint, TaintReason::kUnmappedLineage),
+          "a process inside the tree that the broker lost must still taint");
+    Check(within.stats.foreignProcessEvents == 0,
+          "a process inside the tree must not be counted as foreign");
+
+    // An origin that cannot be established is treated as unsound, because assuming otherwise would
+    // discard the accesses of a short-lived process that really was the pip's.
+    ScenarioOptions unknown = foreign;
+    unknown.untrackedProcessOrigin = ProcessOrigin::kUnknown;
+
+    const ScenarioResult undetermined = RunScenario(unknown, manifest);
+    ReportScenario("event from a process of unknown origin", undetermined);
+
+    Check(HasTaint(undetermined.taint, TaintReason::kUnmappedLineage),
+          "a process whose origin cannot be established must taint");
+}
+
 static void TestQueueOverflowIsDetected(buildxl::common::FileAccessManifest *manifest)
 {
     printf("[queue overflow]\n");
@@ -674,6 +794,8 @@ int main(int argc, char **argv)
     TestRootForkedByBrokerIsTrackedWithoutTaint(manifest.get());
     TestEachFaultIsDetected(manifest.get());
     TestNewerMessageVersionWarnsButDoesNotFail(manifest.get());
+    TestSuppressedSelfEventsAreNotMistakenForDrops(manifest.get());
+    TestForeignProcessEventsAreNotThePipsProblem(manifest.get());
     TestQueueOverflowIsDetected(manifest.get());
     TestBackpressureAvoidsLoss(manifest.get());
     TestNoSilentSkipUnderRandomFaults(manifest.get(), sweepIterations);

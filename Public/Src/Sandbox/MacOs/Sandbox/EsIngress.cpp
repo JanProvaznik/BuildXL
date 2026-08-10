@@ -233,6 +233,11 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.op = NormOp::kExec;
             out.sourcePath = TokenToString(event.exec.target->executable->path);
             out.sourcePathTruncated = event.exec.target->executable->path_truncated;
+            // A process is renumbered when it execs: the identity in message->process is the one it
+            // had since it was forked, and the identity in exec.target is the one every subsequent
+            // message will carry. Both are needed - the first to find the entry created by the FORK
+            // event, the second to re-key it - and this is the only message that carries both.
+            out.identityBeforeExec = out.self;
             out.self = IdentityOf(event.exec.target->audit_token);
             {
                 // Reconstructed rather than read from a single field: BuildXL's breakaway rules match
@@ -644,8 +649,24 @@ void EsIngress::HandleMessage(const es_message_t *message)
         if (!isMarker)
         {
             m_selfEventsSuppressed.fetch_add(1, std::memory_order_relaxed);
+
+            // The kernel has already spent this message's sequence numbers. Remember that, so the
+            // next forwarded event is not mistaken for one that arrived after a drop.
+            m_suppressedSinceForward++;
+            m_suppressedSinceForwardByType[static_cast<uint16_t>(event.op)]++;
             return;
         }
+    }
+
+    event.suppressedBeforeGlobal = m_suppressedSinceForward;
+    m_suppressedSinceForward = 0;
+
+    const uint16_t typeKey = static_cast<uint16_t>(event.op);
+    auto suppressedForType = m_suppressedSinceForwardByType.find(typeKey);
+    if (suppressedForType != m_suppressedSinceForwardByType.end())
+    {
+        event.suppressedBeforeType = suppressedForType->second;
+        suppressedForType->second = 0;
     }
 
     // Bounded: the enqueue waits at most a fixed budget and then reports failure. Nothing here

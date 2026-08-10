@@ -87,15 +87,6 @@ public:
     /** Handles an EXIT event. */
     TaintReason HandleExit(const NormalizedEvent &event);
 
-    /**
-     * Confirms that an event belongs to the tracked tree.
-     *
-     * An event from an untracked identity means either that the broker missed the FORK/EXEC that
-     * introduced it (a real loss) or that the descendants domain contains something the broker did
-     * not model. Both are unsound, so both taint.
-     */
-    TaintReason ValidateLineage(const NormalizedEvent &event) const;
-
     bool IsTracked(const ProcessIdentity &identity) const;
 
     bool IsBreakaway(const ProcessIdentity &identity) const;
@@ -130,7 +121,23 @@ public:
 private:
     TrackedProcess *TryGetMutable(const ProcessIdentity &identity);
 
+    /**
+     * Maps an identity to the one the process currently answers to, following renames recorded at
+     * exec. Returns the identity unchanged when there is nothing to follow.
+     */
+    ProcessIdentity Resolve(const ProcessIdentity &identity) const;
+
     std::unordered_map<ProcessIdentity, TrackedProcess, ProcessIdentityHash> m_processes;
+
+    /**
+     * Pre-exec identity to post-exec identity, for every process that has execed.
+     *
+     * Bounded by the number of execs in one pip, which is the number of processes it runs, so this
+     * does not grow without limit. It exists because the kernel is free to deliver a message that
+     * was in flight when the exec happened, and such a message still carries the old identity.
+     */
+    std::unordered_map<ProcessIdentity, ProcessIdentity, ProcessIdentityHash> m_execPredecessors;
+
     mutable std::unordered_set<ProcessIdentity, ProcessIdentityHash> m_unmapped;
     size_t m_liveCount = 0;
     size_t m_observedCount = 0;

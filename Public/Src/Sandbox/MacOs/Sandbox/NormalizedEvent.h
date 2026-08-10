@@ -133,6 +133,24 @@ struct NormalizedEvent
     /** Per-client, per-event-type sequence. Used as an independent cross-check on gap detection. */
     uint64_t typeSequence = 0;
 
+    /**
+     * How many kernel messages the ingress deliberately withheld between the previously forwarded
+     * event and this one.
+     *
+     * The broker is itself a descendant of nothing and an ancestor of everything it observes, so a
+     * descendants client reports the broker's own syscalls - including the writes it makes to the
+     * report FIFO, which would otherwise feed back without bound. Those messages are suppressed, but
+     * the kernel has already spent their sequence numbers. Without this field the next forwarded
+     * event looks like it arrived after a gap, and SequenceTracker reports a kernel drop that never
+     * happened. On a real build the broker writes constantly, so every pip would taint and nothing
+     * would ever be cacheable.
+     *
+     * `Global` counts all withheld messages; `Type` counts only those that shared this event's
+     * NormOp, because the per-event-type cross-check needs the same correction.
+     */
+    uint64_t suppressedBeforeGlobal = 0;
+    uint64_t suppressedBeforeType = 0;
+
     /** ES message version. Unknown versions taint. */
     uint32_t messageVersion = 0;
 
@@ -167,6 +185,17 @@ struct NormalizedEvent
 
     ProcessIdentity self;
     ProcessIdentity parent;
+
+    /**
+     * For an exec, the identity the process had before it. Invalid on every other event.
+     *
+     * macOS renumbers a process when it execs: its pidversion changes, so the (pid, pidversion) pair
+     * recorded when the process was forked stops matching the pair on every message it sends
+     * afterwards. `self` is the identity going forward, which is what the rest of the system should
+     * use; this is the one that finds the entry the FORK event created, so it can be re-keyed rather
+     * than orphaned.
+     */
+    ProcessIdentity identityBeforeExec;
 
     bool sourceIsDirectory = false;
     bool destinationIsDirectory = false;
