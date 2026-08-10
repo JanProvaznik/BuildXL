@@ -272,13 +272,40 @@ certificate. `es-check.sh` then reports "properly entitled" and the probe passes
 **Route B, relax AMFI locally (fastest real measurement, not for CI).** In Recovery: Startup
 Security Utility → Reduced Security, then `csrutil disable`. After rebooting,
 `sudo nvram boot-args=amfi_get_out_of_my_way=0x1` and reboot again. An ad-hoc signature carrying the
-entitlement is then accepted. This lowers the security of the machine, so a throwaway host is
-better — and best of all is a macOS 27 guest under Virtualization.framework, where SIP and AMFI can
-be relaxed without touching the host at all.
+entitlement is then accepted. This lowers the security of the machine, so it has to be a machine you
+are willing to compromise — and it has to be running macOS 27, which rules out the obvious
+workaround. A VM is **not** a shortcut here: `VZMacOSRestoreImage.fetchLatestSupported` returns
+macOS 26.6.1, the newest publicly fetchable image, and 26.x contains no `es_new_descendants_client`
+at all (0 occurrences in the 26.5 SDK header, 3 in the 27.0 one). Building a macOS 27 guest needs a
+beta IPSW from an Apple seed account — `com_apple_macOSIPSWSeed` returns 403 without one — so the VM
+route needs the same Apple relationship as Route A. Until then the only machine that can run this
+code is a macOS 27 host with AMFI relaxed.
 
-Route B is enough to close every row of the §4.4 table except the one about CI, because the kernel
-behaviour being measured is identical; the entitlement changes who is allowed to ask, not what the
-answer is.
+Route B closes the §4.4 rows about `Normalize`, subscription acceptance, throughput and `FAIL_OPEN`,
+because the kernel behaviour is the same whether the caller is entitled or merely tolerated. It does
+not close the CI row.
+
+**What does not substitute: `/usr/bin/eslogger`.** macOS ships an Apple-signed Endpoint Security
+client that already carries `com.apple.developer.endpoint-security.client`, and with Full Disk
+Access it streams real kernel events as JSON today. It is genuinely useful for one thing — checking
+that the event model matches reality, including the `seq_num`/`global_seq_num` accounting that drop
+detection depends on, and the fact that platform binaries such as `/bin/sh` are visible where dyld
+interposition is blind. But it calls `es_new_client`, so it *is* the 2020 architecture: system-wide
+delivery narrowed in userspace, requiring root and TCC. Measuring it would say nothing about
+descendant scoping, deadline control, or the client budget, which are the entire reason this design
+targets macOS 27. Quoting its numbers as evidence for this design would be the same category error
+this section exists to prevent.
+
+The gate ordering makes the difference concrete. Run unentitled and non-root:
+
+| call | result |
+|---|---|
+| `es_new_client` | `5 ES_NEW_CLIENT_RESULT_ERR_NOT_PRIVILEGED` |
+| `es_new_descendants_client` | `3 ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED` |
+
+The descendants client never reaches the root check. That is the one part of Apple's "does NOT
+require root privilege, does NOT require TCC approval" claim that can be verified without holding
+the entitlement, and it holds.
 
 ---
 
