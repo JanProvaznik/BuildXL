@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "BoundedQueue.h"
@@ -60,6 +61,19 @@ struct EngineStatistics
      */
     uint64_t benignDelegations = 0;
     uint64_t delegationEscapes = 0;
+
+    /**
+     * XPC connects whose verdict could not be reached at the time the event arrived.
+     *
+     * An XPC connect names a service but carries no identity for whoever answers, so the event on
+     * its own cannot distinguish a platform service from a build tool's private daemon. The kernel
+     * does supply that identity, but on the bootstrap look-up for the same name. Those two events
+     * are emitted by different processes - the look-up is submitted by launchd - so Endpoint
+     * Security does not order them against each other, and judging the connect on arrival makes the
+     * verdict depend on delivery order. They are collected instead and resolved in Evaluate.
+     */
+    uint64_t deferredDelegations = 0;
+
     size_t queueHighWaterMark = 0;
 
     /** Enqueues that had to wait for the drain thread, and the total time spent waiting. */
@@ -75,6 +89,19 @@ struct EngineStatistics
 };
 
 /** Configuration for one pip's broker instance. */
+/**
+ * What a path names, as far as the broker can tell.
+ *
+ * kAbsent is a real answer and a load-bearing one: BuildXL treats a probe of a path that does not
+ * exist as an input to the pip's cache key, because the pip's behaviour would change if it appeared.
+ */
+enum class LookupPathType
+{
+    kAbsent,
+    kFile,
+    kDirectory,
+};
+
 /**
  * Where a process sits relative to the pip's process tree.
  *
@@ -147,6 +174,17 @@ struct EngineOptions
      * installs the live implementation, which walks the process's ancestry and stops at the broker.
      */
     std::function<ProcessOrigin(const ProcessIdentity &)> processOrigin;
+
+    /**
+     * Decides what is actually at a path a LOOKUP names.
+     *
+     * Endpoint Security reports the path a lookup resolved but nothing about what it found, and the
+     * difference decides whether BuildXL sees an innocuous directory probe or an undeclared file
+     * read. Injected for the same reason as processOrigin: consulting the real filesystem would make
+     * replayed corpora depend on the machine they run on, so tests supply the world the corpus
+     * describes. Left empty, the engine installs the live implementation, which stats the path.
+     */
+    std::function<LookupPathType(const std::string &)> lookupPathType;
 };
 
 
@@ -228,9 +266,21 @@ public:
     /** Number of processes the engine currently believes are alive. */
     size_t LiveProcessCount() const { return m_processes.LiveCount(); }
 
+    /**
+     * Service names this pip connected to over XPC that the kernel never attested as platform.
+     *
+     * Empty is the expected shape. A name here is the diagnosable form of a delegation escape: it
+     * says which service the pip talked to, which is the only thing that makes the taint
+     * actionable. Reported sorted so two runs of the same pip produce the same evidence.
+     */
+    std::vector<std::string> UnattestedDelegationTargets() const;
+
 private:
     void DrainLoop();
     void ProcessEvent(const NormalizedEvent &event);
+
+    /** Fills in what is actually at a LOOKUP's path, which Endpoint Security does not report. */
+    void ResolveLookupTarget(NormalizedEvent &event);
     bool IsBreakawayExec(const NormalizedEvent &event) const;
     void AddTaint(TaintReason reason);
 
@@ -242,8 +292,24 @@ private:
     SequenceTracker m_sequence;
     ProcessTable m_processes;
     std::function<ProcessOrigin(const ProcessIdentity &)> m_processOrigin;
+    std::function<LookupPathType(const std::string &)> m_lookupPathType;
     FenceProtocol m_fence;
     BoundedQueue<NormalizedEvent> m_queue;
+
+    // Both are written only on the drain thread, which is the only thread that runs ProcessEvent,
+    // and read again once the drain thread has been joined. See UnattestedDelegationTargets.
+    std::unordered_set<std::string> m_attestedPlatformServices;
+    std::unordered_set<std::string> m_deferredDelegationTargets;
+
+    /**
+     * Paths established to be existing directories, so the ancestor chain is stat'ed once.
+     *
+     * Bounded because a pip that walks a large tree would otherwise make the broker's memory a
+     * function of the build rather than of the sandbox. Exceeding the bound costs a syscall per
+     * lookup, not correctness.
+     */
+    static constexpr size_t kMaxKnownDirectories = 1 << 16;
+    std::unordered_set<std::string> m_knownDirectories;
 
     std::thread m_drainThread;
     std::atomic<bool> m_draining{false};

@@ -116,6 +116,12 @@ void EvidenceWriter::WriteSummary(const EvidenceSummary &summary)
              << ",\"foreignProcessEvents\":" << summary.foreignProcessEvents
              << ",\"benignDelegations\":" << summary.benignDelegations
              << ",\"delegationEscapes\":" << summary.delegationEscapes
+             << ",\"unattestedDelegationTargets\":[";
+    for (size_t i = 0; i < summary.unattestedDelegationTargets.size(); i++)
+    {
+        m_stream << (i == 0 ? "" : ",") << "\"" << Escape(summary.unattestedDelegationTargets[i]) << "\"";
+    }
+    m_stream << "]"
              << ",\"queueHighWaterMark\":" << summary.queueHighWaterMark
              << ",\"queueCapacity\":" << summary.queueCapacity
              << ",\"callbackNanosMax\":" << summary.callbackNanosMax

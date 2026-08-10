@@ -333,6 +333,7 @@ bool ReplaySource::WriteCorpus(const std::string &path, const std::vector<Normal
                << ",\"version\":" << event.messageVersion
                << ",\"error\":" << event.error
                << ",\"succeeded\":" << (event.succeeded ? 1 : 0)
+               << ",\"modified\":" << (event.contentModified ? 1 : 0)
                << ",\"srcExists\":" << (event.sourceExists ? 1 : 0)
                << ",\"srcIsDir\":" << (event.sourceIsDirectory ? 1 : 0)
                << ",\"src\":\"" << EscapeJson(event.sourcePath) << "\""
@@ -387,6 +388,7 @@ bool ReplaySource::ReadCorpus(const std::string &path, std::vector<NormalizedEve
         if (ReadNumberField(line, "version", number)) { event.messageVersion = static_cast<uint32_t>(number); }
         if (ReadNumberField(line, "error", number)) { event.error = static_cast<int32_t>(number); }
         if (ReadNumberField(line, "succeeded", number)) { event.succeeded = number != 0; }
+        if (ReadNumberField(line, "modified", number)) { event.contentModified = number != 0; }
         if (ReadNumberField(line, "srcExists", number)) { event.sourceExists = number != 0; }
         if (ReadNumberField(line, "srcIsDir", number)) { event.sourceIsDirectory = number != 0; }
 

@@ -6,6 +6,7 @@
 #include "SandboxEngine.h"
 
 #include <libproc.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace buildxl {
@@ -49,6 +50,20 @@ SandboxEngine::SandboxEngine(
     if (brokerIdentity.IsValid())
     {
         m_processes.AddSyntheticAncestor(brokerIdentity, "bxl-es-broker");
+    }
+
+    m_lookupPathType = m_options.lookupPathType;
+    if (!m_lookupPathType)
+    {
+        m_lookupPathType = [](const std::string &path) {
+            struct stat info = {};
+            if (path.empty() || lstat(path.c_str(), &info) != 0)
+            {
+                return LookupPathType::kAbsent;
+            }
+
+            return S_ISDIR(info.st_mode) ? LookupPathType::kDirectory : LookupPathType::kFile;
+        };
     }
 
     m_processOrigin = m_options.processOrigin;
@@ -275,8 +290,54 @@ void SandboxEngine::ProcessEvent(const NormalizedEvent &event)
     }
 
     std::vector<SandboxEvent> translated;
+
+    if (event.op == NormOp::kLookup)
+    {
+        NormalizedEvent resolved = event;
+        ResolveLookupTarget(resolved);
+        AddTaint(m_translator.Translate(resolved, translated));
+
+        for (SandboxEvent &sandboxEvent : translated)
+        {
+            AddTaint(m_sink->WriteSandboxEvent(sandboxEvent));
+        }
+
+        m_stats.reportsWritten = m_sink->ReportsWritten();
+        m_stats.eventsProcessed++;
+        return;
+    }
+
+    // A path whose type may have just changed cannot keep a remembered verdict.
+    if (IsMutation(event.op))
+    {
+        m_knownDirectories.erase(event.sourcePath);
+        m_knownDirectories.erase(event.destinationPath);
+    }
+
     if (IsDelegation(event.op))
     {
+        if (event.op == NormOp::kBootstrapLookUp && event.delegationTargetIsPlatform)
+        {
+            // The kernel resolved this name to a platform binary. That is an attestation about who
+            // answers, which the XPC connect event for the same name cannot carry.
+            m_attestedPlatformServices.insert(event.delegationTarget);
+        }
+
+        if (event.op == NormOp::kXpcConnect && IsDelegationEscape(event) && !event.delegationTarget.empty())
+        {
+            // Held rather than judged: the attestation may not have arrived yet. Resolved in
+            // Evaluate, by which point every event this run will see has been processed.
+            m_deferredDelegationTargets.insert(event.delegationTarget);
+            m_stats.deferredDelegations++;
+
+            NormalizedEvent deferred = event;
+            deferred.delegationTargetIsPlatform = true;
+            AddTaint(m_translator.Translate(deferred, translated));
+            m_stats.reportsWritten = m_sink->ReportsWritten();
+            m_stats.eventsProcessed++;
+            return;
+        }
+
         if (IsDelegationEscape(event))
         {
             m_stats.delegationEscapes++;
@@ -410,9 +471,58 @@ void SandboxEngine::Shutdown()
     }
 }
 
+void SandboxEngine::ResolveLookupTarget(NormalizedEvent &event)
+{
+    // Endpoint Security's LOOKUP event names a path but says nothing about what is there, and the
+    // defaults - exists, not a directory - make every directory a tool resolves look like a read of
+    // a regular file. That matters because BuildXL's policy makes an explicit exception for
+    // directories: "Accesses to a directory are always allowed ... BuildXL doesn't provide a way to
+    // declare a read/probe-dependency on a directory, and tools tend to emit many such innocuous
+    // probes" (PolicyResult_common.cpp). Without the directory bit the exception never applies.
+    //
+    // This is not a hypothetical. realpath() resolves one component at a time, so a .NET host
+    // starting up probes every ancestor of its own path, and each one was reported as an undeclared
+    // file read - disallowed accesses on '/', '/Users' and the repository root, on pips that had
+    // done nothing wrong. The interposition backend never showed this because it observes the
+    // library call rather than the syscalls underneath it.
+    if (event.sourcePath.empty() || event.sourceTypeKnown)
+    {
+        return;
+    }
+
+    const auto cached = m_knownDirectories.find(event.sourcePath);
+    if (cached != m_knownDirectories.end())
+    {
+        event.sourceExists = true;
+        event.sourceIsDirectory = true;
+        return;
+    }
+
+    const LookupPathType type = m_lookupPathType(event.sourcePath);
+    event.sourceExists = type != LookupPathType::kAbsent;
+    event.sourceIsDirectory = type == LookupPathType::kDirectory;
+
+    // Only existing directories are remembered. Caching absence would be unsound - BuildXL treats a
+    // probe of a path that does not exist as an input, so a file appearing mid-build must be seen -
+    // and caching "is a file" buys nothing, because the hot path this exists for is the ancestor
+    // chain, which is all directories.
+    if (event.sourceIsDirectory && m_knownDirectories.size() < kMaxKnownDirectories)
+    {
+        m_knownDirectories.insert(event.sourcePath);
+    }
+}
+
 TaintReason SandboxEngine::Evaluate(bool supervisionQuiesced) const
 {
     TaintReason result = m_taint;
+
+    // XPC connects were held rather than judged on arrival, because the kernel's attestation for a
+    // service name arrives on a different process's event and Endpoint Security does not order the
+    // two. Everything this run will see has now been processed, so the verdict is stable.
+    if (!UnattestedDelegationTargets().empty())
+    {
+        result |= TaintReason::kDelegationEscape;
+    }
 
     // Queue overflow is checked here rather than at enqueue time so that a rejection racing with
     // shutdown still counts.
@@ -430,6 +540,21 @@ TaintReason SandboxEngine::Evaluate(bool supervisionQuiesced) const
     }
 
     return result;
+}
+
+std::vector<std::string> SandboxEngine::UnattestedDelegationTargets() const
+{
+    std::vector<std::string> unattested;
+    for (const std::string &target : m_deferredDelegationTargets)
+    {
+        if (m_attestedPlatformServices.find(target) == m_attestedPlatformServices.end())
+        {
+            unattested.push_back(target);
+        }
+    }
+
+    std::sort(unattested.begin(), unattested.end());
+    return unattested;
 }
 
 } // namespace macos

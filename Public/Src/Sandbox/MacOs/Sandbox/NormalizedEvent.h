@@ -202,6 +202,27 @@ struct NormalizedEvent
     bool sourceExists = true;
     bool destinationExists = true;
 
+    /**
+     * Whether sourceExists/sourceIsDirectory were established by whoever produced this event.
+     *
+     * Endpoint Security's LOOKUP carries no stat for what it found, so for that one event the fields
+     * above are defaults rather than observations and the engine has to resolve them. Every other
+     * producer - the interpose ingress, a replayed corpus - already knows, and must say so, or the
+     * engine would overwrite a known answer with one read from the live filesystem.
+     */
+    bool sourceTypeKnown = true;
+
+    /**
+     * For a close, whether the file was actually written through the descriptor being closed.
+     *
+     * This deserves its own field rather than riding on one of the ones above, because it is the
+     * only write signal a close carries and getting it wrong is not a subtle failure: a close is
+     * emitted for every file a process opens, so treating them all as writes reports every file a
+     * compiler merely read as a file it produced. Defaults to false so that a backend which does
+     * not set it cannot silently manufacture writes.
+     */
+    bool contentModified = false;
+
     /** Set when ES reported the path itself as truncated. Always taints. */
     bool sourcePathTruncated = false;
     bool destinationPathTruncated = false;
@@ -256,6 +277,9 @@ bool IsAlwaysTainting(NormOp op);
 
 /** True for the three operations that hand work to something outside the descendant domain. */
 bool IsDelegation(NormOp op);
+
+/** Whether an operation can change what is at a path, and so invalidate a remembered path type. */
+bool IsMutation(NormOp op);
 
 /**
  * Decides whether a delegation event actually puts the pip's observation set at risk.

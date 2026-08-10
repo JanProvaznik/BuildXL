@@ -245,8 +245,10 @@ TaintReason EventTranslator::Translate(const NormalizedEvent &event, std::vector
         {
             // ES sets 'modified' on close when the file was written through this descriptor. That is
             // the most reliable write signal macOS gives us, because a descriptor opened for writing
-            // is not proof that anything was written.
-            if (event.succeeded)
+            // is not proof that anything was written. Note that `succeeded` is not that signal: a
+            // close of a file that was only read succeeds too, so testing it reports every file the
+            // process opened as a file it wrote.
+            if (event.succeeded && event.contentModified)
             {
                 SandboxEvent sandboxEvent = MakeEvent(event, EventType::kGenericWrite, event.sourcePath, "");
                 Finalize(event, sandboxEvent, output);

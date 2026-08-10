@@ -291,7 +291,7 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.sourceIsDirectory = IsDirectory(event.close.target);
             // Only a close that actually modified the file is a write. Treating every close as a
             // write would report a write for every file the compiler merely read.
-            out.destinationExists = event.close.modified;
+            out.contentModified = event.close.modified;
             break;
 
         case ES_EVENT_TYPE_NOTIFY_CREATE:
@@ -404,6 +404,13 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.op = NormOp::kLookup;
             out.sourcePath = JoinDirAndName(event.lookup.source_dir, event.lookup.relative_target);
             out.sourcePathTruncated = event.lookup.source_dir->path_truncated;
+
+            // The only event Endpoint Security delivers that names a path without saying what is
+            // there: es_event_lookup_t carries a stat for the *parent* directory and nothing for the
+            // target. Left at the defaults, every directory a tool resolves would be reported as a
+            // read of a regular file, which is how an ancestor probe of '/' became a disallowed file
+            // access. The engine resolves it instead, off the Endpoint Security deadline.
+            out.sourceTypeKnown = false;
             break;
 
         case ES_EVENT_TYPE_NOTIFY_READLINK:

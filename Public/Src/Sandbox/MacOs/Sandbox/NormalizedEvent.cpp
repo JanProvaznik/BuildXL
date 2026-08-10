@@ -116,6 +116,25 @@ bool IsDelegation(NormOp op)
     return op == NormOp::kUipcConnect || op == NormOp::kXpcConnect || op == NormOp::kBootstrapLookUp;
 }
 
+bool IsMutation(NormOp op)
+{
+    switch (op)
+    {
+        case NormOp::kCreate:
+        case NormOp::kWrite:
+        case NormOp::kTruncate:
+        case NormOp::kUnlink:
+        case NormOp::kRename:
+        case NormOp::kLink:
+        case NormOp::kClone:
+        case NormOp::kCopyFile:
+        case NormOp::kExchangeData:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool IsDelegationEscape(const NormalizedEvent &event)
 {
     switch (event.op)

@@ -539,8 +539,8 @@ static void TestPlatformServiceContactIsNotAnEscape(buildxl::common::FileAccessM
 
     Check(HasTaint(escape.taint, TaintReason::kDelegationEscape),
           "handing work to a service outside the platform must taint the pip");
-    Check(escape.stats.delegationEscapes > 0,
-          "a delegation escape must be counted");
+    Check(escape.stats.deferredDelegations > 0,
+          "a delegation escape must be counted, even though its verdict is reached at closure");
 
     // A UNIX-domain socket connect names a file, so it is judged against the manifest like any
     // other access. The corpus emits one per process, so the clean scenario above already proves it
@@ -845,6 +845,231 @@ static void TestPathsAreCleanedLexically()
     }
 }
 
+static void TestOnlyAModifyingCloseIsAWrite(const buildxl::common::FileAccessManifest *manifest)
+{
+    // Found by running a real BuildXL build under the ES backend, which no unit test had done
+    // before: 151 pips failed with DX0500 and every one of the 10,250 reported accesses was a
+    // write, including each pip's own assemblies and read-only system plists.
+    //
+    // The cause was a producer/consumer mismatch. EsIngress stored es_event_close_t::modified, and
+    // the translator tested `succeeded` instead - which is true for the close of a file that was
+    // only read. ES emits a close for every descriptor a process opens, so this reported every
+    // file a tool read as a file it produced. Nothing downstream can recover from that: a write to
+    // an undeclared path is a disallowed file access, and a pip with one is never cached.
+    EventTranslator translator(manifest);
+
+    auto closeOf = [](bool modified) {
+        NormalizedEvent event;
+        event.op = NormOp::kClose;
+        event.self = ProcessIdentity{ 4242, 1 };
+        event.parent = ProcessIdentity{ 4241, 1 };
+        event.sourcePath = std::string(kSourceRoot) + "/input.h";
+        event.messageVersion = 8;
+        event.succeeded = true;
+        event.contentModified = modified;
+        return event;
+    };
+
+    std::vector<buildxl::linux::SandboxEvent> readOnly;
+    translator.Translate(closeOf(false), readOnly);
+    Check(readOnly.empty(), "closing a file that was only read must not report a write");
+
+    std::vector<buildxl::linux::SandboxEvent> written;
+    translator.Translate(closeOf(true), written);
+    Check(written.size() == 1, "closing a file that was written must report exactly one access");
+    Check(!written.empty() && written[0].GetEventType() == buildxl::linux::EventType::kGenericWrite,
+          "a modifying close must be reported as a write");
+
+    // A close that failed says nothing about content, so it must not be a write either even when
+    // the kernel had already flagged the descriptor as modified.
+    NormalizedEvent failed = closeOf(true);
+    failed.succeeded = false;
+    std::vector<buildxl::linux::SandboxEvent> failedOutput;
+    translator.Translate(failed, failedOutput);
+    Check(failedOutput.empty(), "a close that failed must not report a write");
+
+    // The default must be the safe one: a backend that never sets the field cannot invent writes.
+    NormalizedEvent untouched;
+    Check(!untouched.contentModified, "contentModified must default to false");
+}
+
+static void TestAttestationCanArriveAfterTheConnect(buildxl::common::FileAccessManifest *manifest)
+{
+    // Found by running a real BuildXL build under the ES backend: all 148 pips that executed failed
+    // with DelegationEscape, and the service they had "escaped" to was com.apple.cfprefsd.agent -
+    // Apple's own per-user preferences agent, which every process that reads a preference contacts,
+    // .NET included at startup. It was judged an escape only because it lives in the USER domain
+    // rather than SYSTEM, and es_xpc_connect_t carries no identity for whoever answers.
+    //
+    // The kernel does supply that identity, but on the bootstrap look-up for the same name. Those
+    // two events come from different processes - launchd submits the look-up on the caller's behalf
+    // - so Endpoint Security does not order them against each other. Judging the connect when it
+    // arrives would therefore make the verdict depend on delivery order, which is what this pins.
+    auto runWith = [manifest](bool attest, bool attestFirst) {
+        int fds[2] = {-1, -1};
+        if (pipe(fds) != 0)
+        {
+            return std::vector<std::string>{"pipe-failed"};
+        }
+
+        ReportReader reader(fds[0]);
+        reader.Start();
+
+        ReportSink sink;
+        sink.AttachFd(fds[1]);
+
+        const ProcessIdentity brokerIdentity{static_cast<int32_t>(getpid()), 7};
+        const ProcessIdentity rootIdentity{100000, 1};
+
+        EngineOptions engineOptions;
+        engineOptions.processOrigin = [](const ProcessIdentity &) { return ProcessOrigin::kInsideTree; };
+
+        SandboxEngine engine(
+            manifest,
+            &sink,
+            brokerIdentity,
+            "/tmp/bxl-selftest",
+            [](const std::string &) { return true; },
+            engineOptions);
+
+        engine.Start();
+        engine.RegisterRoot(rootIdentity, std::string(kSourceRoot) + "/tool0");
+
+        NormalizedEvent connect;
+        connect.op = NormOp::kXpcConnect;
+        connect.self = rootIdentity;
+        connect.parent = brokerIdentity;
+        connect.delegationTarget = "com.apple.cfprefsd.agent";
+        connect.delegationTargetIsPlatform = false;
+        connect.messageVersion = 8;
+        connect.succeeded = true;
+
+        NormalizedEvent lookup = connect;
+        lookup.op = NormOp::kBootstrapLookUp;
+        lookup.delegationTargetIsPlatform = true;
+
+        if (attest && attestFirst)
+        {
+            engine.OnEvent(NormalizedEvent(lookup));
+        }
+
+        engine.OnEvent(NormalizedEvent(connect));
+
+        if (attest && !attestFirst)
+        {
+            engine.OnEvent(NormalizedEvent(lookup));
+        }
+
+        engine.Shutdown();
+        std::vector<std::string> unattested = engine.UnattestedDelegationTargets();
+
+        sink.WriteSentinel(ReportSink::kEndOfReportsSentinel);
+        sink.Close();
+        reader.Join();
+        return unattested;
+    };
+
+    Check(runWith(true, true).empty(),
+          "a kernel attestation before the connect must exonerate the service");
+
+    // The hazard the deferral exists for. Before this, delivery order decided the verdict.
+    Check(runWith(true, false).empty(),
+          "a kernel attestation after the connect must exonerate the service just the same");
+
+    const std::vector<std::string> never = runWith(false, false);
+    Check(never.size() == 1 && never[0] == "com.apple.cfprefsd.agent",
+          "a service the kernel never attested must remain an escape, and be named");
+}
+
+static void TestADirectoryProbeIsNotAFileRead(buildxl::common::FileAccessManifest *manifest)
+{
+    printf("[lookup path type]\n");
+
+    // Endpoint Security's LOOKUP names a path but reports no stat for it, so the engine has to
+    // resolve what is there. Getting that wrong is not cosmetic: BuildXL allows directory probes
+    // unconditionally ("tools tend to emit many such innocuous probes" - PolicyResult_common.cpp)
+    // but treats an undeclared file read as a violation. A tool resolving its own path probes every
+    // ancestor, so mis-typing them turned '/' and '/Users' into disallowed accesses on pips that
+    // had done nothing wrong.
+    //
+    // The path is deliberately outside every declared scope, which is what an ancestor of the source
+    // root actually is.
+    const std::string ancestor = "/tmp/bxl-selftest";
+
+    auto runWith = [&](LookupPathType type) {
+        int fds[2] = {-1, -1};
+        pipe(fds);
+
+        ReportReader reader(fds[0]);
+        reader.Start();
+
+        ReportSink sink;
+        sink.AttachFd(fds[1]);
+
+        const ProcessIdentity brokerIdentity{static_cast<int32_t>(getpid()), 21};
+        const ProcessIdentity rootIdentity{100000, 1};
+
+        EngineOptions engineOptions;
+        engineOptions.processOrigin = [](const ProcessIdentity &) { return ProcessOrigin::kInsideTree; };
+        engineOptions.lookupPathType = [type](const std::string &) { return type; };
+
+        SandboxEngine engine(
+            manifest,
+            &sink,
+            brokerIdentity,
+            "/tmp/bxl-selftest",
+            [](const std::string &) { return true; },
+            engineOptions);
+
+        engine.Start();
+        engine.RegisterRoot(rootIdentity, std::string(kSourceRoot) + "/tool0");
+
+        NormalizedEvent lookup;
+        lookup.op = NormOp::kLookup;
+        lookup.self = rootIdentity;
+        lookup.parent = brokerIdentity;
+        lookup.sourcePath = ancestor;
+        lookup.messageVersion = 8;
+        lookup.succeeded = true;
+
+        // What the Endpoint Security ingress produces: the type is not established at the ingress.
+        lookup.sourceTypeKnown = false;
+
+        engine.OnEvent(std::move(lookup));
+        engine.Shutdown();
+
+        sink.WriteSentinel(ReportSink::kEndOfReportsSentinel);
+        sink.Close();
+        reader.Join();
+
+        std::vector<ParsedReport> matching;
+        for (const ParsedReport &report : reader.Reports())
+        {
+            if (report.path == ancestor)
+            {
+                matching.push_back(report);
+            }
+        }
+
+        return matching;
+    };
+
+    const std::vector<ParsedReport> asDirectory = runWith(LookupPathType::kDirectory);
+    Check(asDirectory.size() == 1, "a lookup must produce exactly one report");
+    Check(!asDirectory.empty() && asDirectory[0].isDirectory,
+          "a lookup that found a directory must be reported as a directory");
+    Check(!asDirectory.empty() && asDirectory[0].fileAccessStatus == FileAccessStatus_Allowed,
+          "probing a directory outside every declared scope must be allowed");
+
+    // The control. Identical in every respect except what the resolver found, which proves the type
+    // is the only thing standing between an allowed probe and a violation.
+    const std::vector<ParsedReport> asFile = runWith(LookupPathType::kFile);
+    Check(asFile.size() == 1 && !asFile[0].isDirectory,
+          "a lookup that found a regular file must be reported as a file");
+    Check(!asFile.empty() && asFile[0].fileAccessStatus == FileAccessStatus_Denied,
+          "reading an undeclared regular file must still be a violation");
+}
+
 int main(int argc, char **argv)
 {
     uint64_t sweepIterations = 100000;
@@ -882,6 +1107,9 @@ int main(int argc, char **argv)
     const uint64_t start = NowNanos();
 
     TestPathsAreCleanedLexically();
+    TestOnlyAModifyingCloseIsAWrite(manifest.get());
+    TestAttestationCanArriveAfterTheConnect(manifest.get());
+    TestADirectoryProbeIsNotAFileRead(manifest.get());
     TestCleanRunReportsEverything(manifest.get());
     TestRootForkedByBrokerIsTrackedWithoutTaint(manifest.get());
     TestEachFaultIsDetected(manifest.get());

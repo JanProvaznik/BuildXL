@@ -684,7 +684,22 @@ int main(int argc, char **argv)
         // An error-severity debug message is how the Unix sandbox tells BuildXL that this pip's
         // observations are incomplete. BuildXL then refuses to cache the pip and re-runs it, which is
         // the whole reason it is safe to be conservative everywhere else in this broker.
-        sink.WriteTaint(taint, childPid, std::string("macOS sandbox (") + ingress->BackendName() + " backend)");
+        std::string context = std::string("macOS sandbox (") + ingress->BackendName() + " backend)";
+
+        // Naming the services is what makes a delegation escape actionable rather than just a rerun:
+        // the whole finding is "something may have done work for this pip", and the only useful
+        // follow-up question is what.
+        const std::vector<std::string> unattested = engine.UnattestedDelegationTargets();
+        if (!unattested.empty())
+        {
+            context += ", unattested delegation targets: ";
+            for (size_t i = 0; i < unattested.size(); i++)
+            {
+                context += (i == 0 ? "" : ", ") + unattested[i];
+            }
+        }
+
+        sink.WriteTaint(taint, childPid, context);
     }
 
     CloseReportStream(sink, &manifest, argv[0]);
@@ -706,6 +721,7 @@ int main(int argc, char **argv)
             summary.foreignProcessEvents = stats.foreignProcessEvents;
             summary.benignDelegations = stats.benignDelegations;
             summary.delegationEscapes = stats.delegationEscapes;
+            summary.unattestedDelegationTargets = engine.UnattestedDelegationTargets();
             summary.queueHighWaterMark = stats.queueHighWaterMark;
             summary.queueCapacity = EngineOptions().queueCapacity;
             summary.callbackNanosMax = stats.callbackNanosMax;

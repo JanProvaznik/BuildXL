@@ -50,6 +50,15 @@ struct EvidenceSummary
     uint64_t foreignProcessEvents = 0;
     uint64_t benignDelegations = 0;
     uint64_t delegationEscapes = 0;
+
+    /**
+     * Which services an escape was about.
+     *
+     * A count alone is not diagnosable: it says a pip may have had work done on its behalf without
+     * saying by whom, which is the difference between a report an engineer can act on and one they
+     * can only rerun.
+     */
+    std::vector<std::string> unattestedDelegationTargets;
     uint64_t queueHighWaterMark = 0;
     uint64_t queueCapacity = 0;
     uint64_t callbackNanosMax = 0;
