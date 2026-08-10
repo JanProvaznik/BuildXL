@@ -241,6 +241,45 @@ sharded six system-wide clients across event buckets and still had to switch the
 a 2-core CI VM. Kernel-side descendant scoping is the reason to expect a different outcome, not a
 demonstration that there will be one.
 
+### 4.5 How to actually get the entitlement, and how to check it worked
+
+`Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/es-check.sh` answers "can this machine run it, and if
+not, exactly which precondition is missing". It reports the OS, the SDK, SIP, the AMFI boot argument,
+keychain identities and installed provisioning profiles, then builds `es-probe.c`, signs it with the
+best identity available, and runs a real four-stage check: client created, `FAIL_OPEN` accepted,
+subscription accepted, and a file access by a `/bin/sh` child actually observed. The last stage
+matters because `/bin/sh` is a platform binary, so it is precisely what dyld interposition cannot
+see — a pass there is the thing this whole document is missing.
+
+```bash
+Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/es-check.sh              # diagnose, build, sign, run
+Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/es-check.sh --diagnose   # report only
+```
+
+Exit codes: 0 usable, 1 a precondition is missing, 2 could not build. On the machine this work was
+done on it exits 137 — built, ad-hoc signed, `SIGKILL`ed by AMFI — which is the blocker reproduced
+in one command.
+
+**Route A, the entitlement (what CI and production need).** Requires an Apple Developer Program
+membership; for a company that means an Organization account. Request
+`com.apple.developer.endpoint-security.client` through Apple's system extension request form at
+`https://developer.apple.com/contact/request/system-extension/`, describing the use — a build system
+observing file accesses of its own child processes in order to decide what is safe to cache. Apple
+grants this routinely to build and security tooling. On approval, add the entitlement to the App ID,
+regenerate and install the provisioning profile, and sign the broker with a Developer ID Application
+certificate. `es-check.sh` then reports "properly entitled" and the probe passes.
+
+**Route B, relax AMFI locally (fastest real measurement, not for CI).** In Recovery: Startup
+Security Utility → Reduced Security, then `csrutil disable`. After rebooting,
+`sudo nvram boot-args=amfi_get_out_of_my_way=0x1` and reboot again. An ad-hoc signature carrying the
+entitlement is then accepted. This lowers the security of the machine, so a throwaway host is
+better — and best of all is a macOS 27 guest under Virtualization.framework, where SIP and AMFI can
+be relaxed without touching the host at all.
+
+Route B is enough to close every row of the §4.4 table except the one about CI, because the kernel
+behaviour being measured is identical; the entitlement changes who is allowed to ask, not what the
+answer is.
+
 ---
 
 ## 5. Benchmark protocol
