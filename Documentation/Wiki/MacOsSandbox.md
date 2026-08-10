@@ -2161,6 +2161,12 @@ inside the emitter and the first slice always succeeds.
 Measured after, on the same tool: **520 ms → 34 ms**, fence latency 11.6 ms, `taintReason: None`.
 Self test unaffected.
 
+Re-emission is new hot-path behaviour, so it was checked for storming under contention: ten brokers
+started at once, on a ten-core machine, produced fence latencies of 11.1–11.9 ms and
+`markerAttempts` of **23 in every one of the ten** — identical to a single broker running alone. The
+loop converges rather than amplifying, and the extra markers it emits are ~23 events against the
+64,011 a small build already produces.
+
 ### 16.7 Disabling AMFI to test ES breaks .NET, and that is the argument for the entitlement
 
 Relaxing SIP and AMFI is what makes an ad-hoc signature carry the ES entitlement, and §4.5 presents
