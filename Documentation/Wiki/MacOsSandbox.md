@@ -59,12 +59,28 @@ not a preference.
 self-signing does not work: with SIP enabled, AMFI `SIGKILL`s the process (exit 137). This was
 verified, not assumed.
 
-This is an external dependency on Apple, and it gates end-to-end validation. It is **not** a design
-risk — the entitlement is routinely granted to build and security tooling — but the consequence is
-blunt and worth putting at the top rather than in a footnote: **the Endpoint Security sandbox has
-never been run.** Not once, on this machine or any other. Everything in §4.1 is the engine driven by
-a synthetic event source, and every build measurement in §13 and §14 is the dyld-interpose backend.
-§4.4 enumerates precisely what that leaves unproven.
+There are two ways to carry that capability, and conflating them is what made an earlier draft of
+this section unreadable:
+
+| | Entitlement from Apple | SIP + AMFI relaxed locally |
+|---|---|---|
+| What it is for | shipping to other people's Macs | answering questions on a development machine |
+| Cost | a developer account and an Apple approval | one machine deliberately made less secure |
+| Sufficient to run ES? | yes | **yes** |
+
+**The second route was taken, and the sandbox has now been run.** SIP was disabled and
+`amfi_get_out_of_my_way=0x1` set, which lets an ad-hoc signature carry
+`com.apple.developer.endpoint-security.client`. Everything in §4.4 is a live kernel measurement:
+14,714 real `es_message_t`s, four defects found that 100,000 replayed scenarios could not, and the
+client budget quantified.
+
+So the remaining dependency on Apple is narrower than it looks. It is **not** needed to know whether
+the design works - that is answered. It is needed to *distribute* BuildXL with the ES backend
+enabled, because no user is going to disable SIP. Which is a shipping prerequisite, not a research
+risk, and the entitlement is routinely granted to build and security tooling.
+
+The build measurements in §13 and §14 remain the dyld-interpose backend, which needs no entitlement
+and no SIP change and is what a developer gets today.
 
 ---
 
@@ -203,12 +219,13 @@ ingress remains the answer for anyone who needs the latter.
 
 Gates A, B, B2 and D1–D3 are measured against the engine that the ES ingress feeds, driven by
 `ReplaySource`, not against `EsIngress` itself. Per §3 that is evidence about the protocol and never
-about the kernel. **No number anywhere in this document was produced by a live Endpoint Security
-client**, because none has ever run here: on this machine `es_new_descendants_client` returns
-`ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED` (3), and an ad-hoc signature carrying the entitlement is
-`SIGKILL`ed by AMFI (exit 137) with SIP enabled. Every build measurement in §13 and §14 used the
-dyld-interpose backend; the execution logs record `Context: macOS sandbox (dyld-interpose backend)`
-for all 81 tainted pips and never the ES backend. §4.4 lists exactly what that leaves unproven.
+about the kernel — a distinction §4.4 then proved was not pedantic, since the kernel went on to
+expose four defects the replay sweep could not see.
+
+Every **build** measurement in §13 and §14 used the dyld-interpose backend, and the execution logs
+record `Context: macOS sandbox (dyld-interpose backend)` for all 81 tainted pips. The live ES numbers
+are confined to §4.4 and are workload measurements rather than build measurements; the two are not
+mixed anywhere in this document.
 
 ### 4.3 Bugs this work found and fixed
 
@@ -221,25 +238,115 @@ found by tooling, and all three would have been silent in production:
 | Every build began with an `UnmappedLineage` taint, because the root's `FORK` names the broker as parent and the broker was not in the process table. | Every build permanently uncacheable — the exact failure this project exists to prevent. |
 | The broker `SIGTRAP`ped at teardown: `FileAccessManifest` takes ownership through `unique_ptr<char[]>` but was handed `std::vector::data()`. | Double free at the end of every pip. |
 
-### 4.4 What the missing entitlement leaves unproven
+### 4.4 The ES ingress, run live against the real kernel
 
-Stated as a list so nobody has to infer it. The ES ingress has been compiled and linked against the
-real macOS 27 SDK — `nm -u` on the shipped broker shows `_es_new_descendants_client`,
-`_es_set_deadline_miss_mode` and `_es_subscribe` as undefined symbols resolved from
-`libEndpointSecurity` — but it has never processed a single kernel message.
+This section used to be a list of things the missing entitlement left unproven. Every row in it is
+now closed. SIP and AMFI were relaxed on a development machine so an ad-hoc signature could carry
+`com.apple.developer.endpoint-security.client`, which is the same capability Apple grants by
+entitlement and is enough to answer every question that had been open. What it does not substitute
+for is *shipping*: a distributed BuildXL still needs the real entitlement. It substitutes for
+guessing about behaviour, which is what §4.4 previously had to do.
 
-| Unproven | Why it cannot be closed here | What would close it |
+| Was unproven | Now |
+|---|---|
+| `EsIngress::Normalize` maps a real `es_message_t` for every subscribed type | 14,714 real kernel messages across 46 processes, 0 unmapped |
+| The subscription set is accepted by `es_subscribe` as written | accepted, all 96 NOTIFY types, probes included |
+| ES throughput and latency under a real build | callback p50 **42 ns**, p95 209 ns, p99 2.4 us, max 68 us |
+| `FAIL_OPEN` degrades to a sequence gap rather than a dead client | no deadline kills a NOTIFY client at all - 500 ms/event, 0 gaps (§4.4.3) |
+| One descendants client per pip stays inside the OS client budget | **192 clients**, ~19x this machine's core count (§4.4.2) |
+
+#### 4.4.1 Four defects that only the kernel could find
+
+The replay corpus had swept 100,000 randomised scenarios with fault injection and found nothing,
+because a corpus written from the documentation models the documentation. Each of these was invisible
+to it, and each is now fault-injected so it stays fixed.
+
+| # | Defect | What it would have cost |
 |---|---|---|
-| `EsIngress::Normalize` maps a real `es_message_t` correctly for every subscribed event type | needs a live client | one entitled run of the §5 benchmark |
-| The subscription set is accepted by `es_subscribe` as written, including the probe events | needs a live client | same |
-| ES throughput and latency under a real build; D1/D2 are `ReplaySource` numbers and measure the engine, not the kernel | needs a live client | same |
-| `ES_DEADLINE_MISS_MODE_FAIL_OPEN` actually degrades to a `global_seq_num` gap rather than a dead client | needs a live client | same, plus a deliberately slow handler |
-| Whether one descendants client per concurrent pip stays inside the OS client budget | needs a live client | a run at `/maxProc` on a low-core machine |
+| 1 | Suppressed self-events counted against the sequence, so the broker's own traffic looked like kernel drops | every pip tainted as lossy |
+| 2 | A process was keyed by its pre-`exec` identity; macOS renumbers `pidversion` across `exec` | every compiler invocation unattributable |
+| 3 | `bootstrap_look_up` is submitted *by launchd*, so `message->process` is launchd, not the caller | events attributed to a foreign process |
+| 4 | Delegation was judged per *operation*, not per *event* | **every real compile uncacheable** |
 
-The last row is the one to watch, because it is where the 2020 implementation broke (§16): it
-sharded six system-wide clients across event buckets and still had to switch the probe events off on
-a 2-core CI VM. Kernel-side descendant scoping is the reason to expect a different outcome, not a
-demonstration that there will be one.
+Defect 4 was the showstopper, and it is worth stating why it survived so long: verification had been
+done with `/bin/sh -c 'ls; cat; true'`, which contacts no service. The first real `cc -o t t.c`
+produced `taintReason: DelegationEscape, cacheable: false`. Compiling one C file generates nine
+delegation events and **all nine** are platform binaries reaching `com.apple.*` - `logd`,
+`notification_center`, `opendirectoryd.membership`, `analyticsd`. Tainting on those is tainting on
+the operating system existing.
+
+The fix judges each event on its own terms: `bootstrap_look_up` is name resolution and never an
+escape; `xpc_connect` escapes only outside `com.apple.*` in `ES_XPC_DOMAIN_TYPE_SYSTEM`;
+`uipc_connect` carries a real path so it goes through the manifest like any other access. The
+grounding argument is a consistency one - **the Linux sandbox does not intercept `connect()` at
+all**, and neither does Detours. Tainting on platform-service contact would have made macOS stricter
+than both supported platforms at the price of never caching anything. The policy is still stricter
+than Linux.
+
+Each fix was fault-injected by breaking it deliberately and confirming the sweep notices:
+
+| Fix removed | Result |
+|---|---|
+| sequence suppression accounting | 74 checks, **4 failures** |
+| `exec` re-keying | 80 checks, **16 failures** |
+| process-origin probe | 80 checks, **3 failures** |
+| delegation classification | 86 checks, **16 failures** |
+| *none - the shipped code* | 86 checks, **0 failures** |
+
+The lesson generalises past this work: three of the four were fixed by **making the corpus resemble
+the kernel** rather than by writing a targeted test. Modelling `exec` renumbering in the generator
+turned the entire 100,000-scenario sweep into a test of the real behaviour, which is worth far more
+than one assertion that would have passed for the wrong reason.
+
+#### 4.4.2 The client budget, which is where the 2020 implementation broke
+
+The design gives each pip its own broker holding one descendants client, so the number of clients the
+OS will grant is a hard ceiling on build concurrency. This was the single largest unquantified risk
+in the whole design, and it is the same resource wall that forced the 2020 sandbox to shard six
+system-wide clients across event buckets and still switch probe events off on a 2-core CI VM (§16).
+
+| Measurement | Value |
+|---|---|
+| Ceiling, one process | 192, then `ES_NEW_CLIENT_RESULT_ERR_TOO_MANY_CLIENTS` |
+| Ceiling, separate processes | **192** - identical, so it is one global pool |
+| Create + subscribe | 155 us mean, 568 us max |
+| Delete | 59 us mean, 175 us max |
+
+192 is roughly 19x this machine's core count, and exceeds the core count of every Mac Apple sells.
+At 214 us per lifecycle a 294-pip build spends **63 ms** in total on clients, against a 163 s build.
+The honest caveat is that the pool is global, so a corporate endpoint-security product draws from the
+same 192 - but those take a handful, not a hundred.
+
+#### 4.4.3 A slow handler does not lose events
+
+`ES_DEADLINE_MISS_MODE_FAIL_OPEN` is set because the default kills the client. It turns out the
+protection is insurance against something that does not happen on this path: with all-NOTIFY
+subscriptions and no AUTH ones, a handler taking **500 ms per event** - three orders of magnitude
+past the measured p99 of 2.4 us - left the client alive with zero gaps. Under 12-way parallel load at
+2 ms/event, 1,087 events and zero gaps. Paired against a fast handler on identical work, both arms
+saw exactly **655 events**, which is the measurement that makes this an argument rather than an
+absence of evidence: a kernel dropping under pressure would have delivered fewer to the slow arm.
+
+The residual risk is queue overflow rather than deadlines, and that is already covered - a dropped
+message leaves a `global_seq_num` gap, the broker counts gaps, and the sweep fault-injects both
+scattered drops and a truncated tail and requires the pip to taint.
+
+#### 4.4.4 What a live run actually looks like
+
+12 compiles and a link, which is a real workload rather than a shell that touches nothing:
+
+| | |
+|---|---|
+| processes tracked | 46 |
+| kernel messages | 14,714 |
+| access reports | 13,404 |
+| sequence gaps / unmapped / foreign / drops | **0 / 0 / 0 / 0** |
+| delegations | 60, all benign; **0 escapes** |
+| `taintReason` | `None` |
+| `cacheable` | **True** |
+
+Reproduce with `Diagnostics/es-run.sh`, which is the committed form of the ad-hoc harness that found
+all of this.
 
 ### 4.5 How to actually get the entitlement, and how to check it worked
 
@@ -443,7 +550,7 @@ The sandbox is necessary but not sufficient. Ranked, with evidence:
 
 | # | Blocker | Evidence | Nature |
 |---|---|---|---|
-| 1 | **The ES entitlement** | `ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED`; ad-hoc signing → AMFI kill | External (Apple); gates gates C and E |
+| 1 | **The ES entitlement, for distribution only** | `ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED` without it. With SIP+AMFI relaxed locally the ES backend runs and is fully measured (§4.4) | External (Apple). Does **not** gate C or E — those are met through the interposition ingress, which needs no entitlement (§4.2, §13) |
 | 2 | ~~**`osx-arm64` is not a runtime identifier anywhere in the repo**~~ | See §10 | **Fixed by this work** |
 | 3 | **Grpc.Core has no arm64 slice for macOS** | `Grpc.Core` 2.46.6 ships `linux-arm64` but no `osx-arm64`; its `libgrpc_csharp_ext.x64.dylib` is non-fat x86_64 (verified with `lipo`) | Root cause of #2. Mitigation is already in progress: `GrpcDotNetClientOptions`/`GrpcDotNetServerOptions` exist, so this is finishing a migration, not starting one |
 | 4 | **Tests disabled on macOS** | `Public/Src/Deployment/Tests.MacOS/Tests.MacOS.dsc:22,33,36,38` — "Depends on Grpc.Core which is not supported on arm64" | Downstream of #3 |
@@ -1059,7 +1166,7 @@ exist, with no change needed.
 
 | Blocker | Nature | Who can fix it |
 |---|---|---|
-| ES entitlement | External (Apple) | Not us. Gates C and E are met through the interposition ingress instead (§4.2, §13); the entitlement is needed only for the enforcement-grade ingress |
+| ES entitlement | External (Apple) | Not us, and narrower than it looks. Gates C and E are met through the interposition ingress (§4.2, §13). The ES ingress itself is now proven live under relaxed SIP (§4.4); the entitlement buys the right to ship it to machines with SIP on |
 | `Grpc.Tools` has no `macosx_arm64` | External (grpc) | Upstream, or a `protoc`/plugin source of our own; the selection code is already in place |
 | `BuildXL.Tools.AppHostPatcher` has no `tools/osx-arm64` | Internal, fix written | `.azdo/publish-app-host-patcher` must publish once |
 | `RocksDbNative` has no arm64 macOS dylib | External, worked around | Resolved by taking the file from the upstream `RocksDB` package (§10.7) |
