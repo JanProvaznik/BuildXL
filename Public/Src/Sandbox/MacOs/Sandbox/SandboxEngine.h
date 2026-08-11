@@ -128,11 +128,30 @@ struct EngineOptions
     /**
      * Maximum events buffered between the delivery thread and the drain thread.
      *
-     * Sized for scheduling jitter, not for absorbing a whole build: with backpressure enabled the
-     * delivery thread waits rather than drops, so a deeper queue buys nothing but resident memory -
-     * and BuildXL runs one broker per concurrently executing pip.
+     * Sized by measurement, on parallel clang++ compiles - the workload that ended the 2019 attempt,
+     * because C++ header search is what produces path-resolution events in bulk. At 16384 the queue
+     * saturated at 8 concurrent compiles and the kernel began dropping; by 16 it had lost more than
+     * half the stream. At 262144 the same machine reaches 64 concurrent compiles with zero drops and
+     * no taint of any kind, and saturates at 128:
+     *
+     *     capacity   concurrency   events    kernel drops
+     *      16384          8         51796          16
+     *      16384         16         69708       93523
+     *     262144         16        103407           0
+     *     262144         32        206725           0
+     *     262144         64        412758           0
+     *     262144        128        636738      429827
+     *
+     * Note the event counts: at 16 concurrent compiles the deeper queue observes 103407 events where
+     * the shallow one observed 69708. The shallow queue was not coping and reporting less; it was
+     * losing events it never saw, which is precisely why the drop counter has to exist.
+     *
+     * 64 concurrent processes in one pip's tree is far beyond what a scheduler produces - this
+     * machine has 6 performance cores - and BuildXL parallelises across pips, each with its own
+     * broker, rather than within one. The cost is bounded: the queue holds pointers and grows only
+     * on demand, so the resident cost is paid by builds that actually generate the events.
      */
-    size_t queueCapacity = 1 << 14;
+    size_t queueCapacity = 1 << 18;
 
     /**
      * Longest a delivery thread may wait for queue space before giving up and tainting.
@@ -140,8 +159,15 @@ struct EngineOptions
      * Dropping an event costs the whole pip, so it is worth waiting; missing an Endpoint Security
      * deadline costs the whole client, so the wait must stay small. Callers that know the real
      * remaining deadline pass it to OnEvent and this acts only as the upper bound.
+     *
+     * 2000us was too small to ride out a scheduling hiccup under load: at 8 concurrent compiles it
+     * gave up 16 times and the kernel dropped those events. 20000us eliminated that entirely at the
+     * same concurrency, and is still an order of magnitude inside the NOTIFY deadline. It does not
+     * rescue a queue that is genuinely too small - at 16 compiles with the old capacity, drops rose
+     * rather than fell - which is the evidence that capacity and backpressure fix different
+     * failures, and why both were needed.
      */
-    std::chrono::microseconds maxEnqueueBackpressure{2000};
+    std::chrono::microseconds maxEnqueueBackpressure{20000};
 
     /** How long to wait for a fence marker before giving up and tainting. */
     std::chrono::milliseconds fenceTimeout{5000};
