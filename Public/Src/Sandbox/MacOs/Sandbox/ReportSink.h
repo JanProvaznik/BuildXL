@@ -109,6 +109,15 @@ private:
     std::mutex m_mutex;
     std::vector<char> m_scratch;
     std::vector<char> m_pending;
+
+    /**
+     * Set once the sink is closing, which makes FlushLocked block until everything is written.
+     *
+     * During the run a short write is kept buffered rather than waited on, because the drain thread
+     * that calls this is also the only consumer of the event queue. At close there is no queue left
+     * to protect and a dropped report is a missing cache-key input, so the trade reverses.
+     */
+    bool m_drainingToClose = false;
     int m_fd = -1;
     uint64_t m_reportsWritten = 0;
     uint64_t m_truncatedPaths = 0;

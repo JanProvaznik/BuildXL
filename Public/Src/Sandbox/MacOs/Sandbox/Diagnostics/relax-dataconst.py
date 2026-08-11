@@ -70,16 +70,32 @@ TARGET_NAMES = ("libcoreclr.dylib",)
 
 def slice_offsets(buf):
     """Byte offsets of each Mach-O slice, so fat binaries are handled as well as thin ones."""
+    # A sweep runs over whatever is on disk, which includes files that are not Mach-O at all and,
+    # in at least one real case, files that are empty. Reading a header out of those must not be
+    # fatal to the sweep.
+    if len(buf) < 8:
+        return []
+
     magic, = struct.unpack_from(">I", buf, 0)
     if magic != FAT_MAGIC:
         return [0]
 
     count, = struct.unpack_from(">I", buf, 4)
-    return [struct.unpack_from(">I", buf, 8 + i * 20 + 8)[0] for i in range(count)]
+    offsets = []
+    for i in range(count):
+        header = 8 + i * 20
+        if header + 20 > len(buf):
+            break
+        offsets.append(struct.unpack_from(">I", buf, header + 8)[0])
+
+    return offsets
 
 
 def visit(buf, base, clear):
     """Returns how many __DATA_CONST segments in this slice carry SG_READ_ONLY."""
+    if base + 32 > len(buf):
+        return 0
+
     magic, = struct.unpack_from("<I", buf, base)
     if magic != MAGIC_64:
         return 0
@@ -89,8 +105,14 @@ def visit(buf, base, clear):
     found = 0
 
     for _ in range(command_count):
+        if offset + 8 > len(buf):
+            break
+
         command, size = struct.unpack_from("<II", buf, offset)
-        if command == LC_SEGMENT_64:
+        if size == 0:
+            break
+
+        if command == LC_SEGMENT_64 and offset + SEGMENT_FLAGS_OFFSET + 4 <= len(buf):
             name = buf[offset + 8:offset + 24].rstrip(b"\0").decode("ascii", "replace")
             flags, = struct.unpack_from("<I", buf, offset + SEGMENT_FLAGS_OFFSET)
             if name == "__DATA_CONST" and (flags & SG_READ_ONLY):

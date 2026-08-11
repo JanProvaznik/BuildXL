@@ -75,6 +75,22 @@ bool ReportSink::Open(const std::string &fifoPath, std::string &errorMessage)
 void ReportSink::Close()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Everything buffered has to reach the reader before the descriptor goes away, so the deliberate
+    // non-blocking behaviour of FlushLocked is switched off here. This is the one place where
+    // blocking is correct: the observed process has finished, so there is no event queue left to
+    // stall, and a report dropped at this point is a missing dependency in the pip's cache key.
+    m_drainingToClose = true;
+
+    if (m_fd >= 0)
+    {
+        const int flags = fcntl(m_fd, F_GETFL, 0);
+        if (flags >= 0)
+        {
+            (void)fcntl(m_fd, F_SETFL, flags & ~O_NONBLOCK);
+        }
+    }
+
     FlushLocked();
     if (m_fd >= 0)
     {
@@ -89,6 +105,14 @@ bool ReportSink::AttachFd(int fd)
     if (m_fd >= 0 || fd < 0)
     {
         return false;
+    }
+
+    // Non-blocking, so a reader that falls behind cannot stall the drain thread. See FlushLocked.
+    // A failure here is not fatal: the descriptor simply stays blocking, which is the old behaviour.
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0)
+    {
+        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
 
     m_fd = fd;
@@ -168,6 +192,18 @@ bool ReportSink::FlushLocked()
             if (errno == EINTR)
             {
                 continue;
+            }
+
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) && !m_drainingToClose)
+            {
+                // The reader is behind. Keeping the rest buffered and returning is the whole point:
+                // this runs on the drain thread, which is also the only consumer of the event queue,
+                // so blocking here stalls that queue until the delivery thread gives up and taints
+                // the pip. The reports are not lost - they stay in m_pending and go out on the next
+                // flush, or at close, where the descriptor is put back into blocking mode so nothing
+                // is dropped.
+                m_pending.erase(m_pending.begin(), m_pending.begin() + static_cast<ptrdiff_t>(written));
+                return true;
             }
 
             m_writeFailures++;
