@@ -2462,7 +2462,52 @@ Those builds have 0–5% cache hits precisely because each change invalidates fi
 incremental build runs at 40–90% hits with far less concurrency, which is why the C++ build and
 warm rebuilds pass cleanly.
 
-The remaining honest statement: under maximum concurrent load the sandbox still taints a small
-number of pips, always safely (uncacheable, never wrong), and the retry path is the designed answer
-for exactly that. The retry fix itself is verified by compilation and by mirroring the Linux branch,
-not yet by observing a retry succeed end to end.
+### 17.9 The retry, observed end to end
+
+The retry fix was the last claim in this document resting on inspection rather than execution. It no
+longer is.
+
+Deploying it needed a build of `BuildXL.ProcessPipExecutor.dll`, which the managed build could not
+produce here. Compiling that one assembly directly against the deployed assemblies works, with two
+details that must match or the runtime refuses to load it: BuildXL's strong-name key
+(`Public/Sdk/SelfHost/BuildXL/BuildXL.DevKey.snk`), and assembly version `1.0.0.0` — a default
+`0.0.0.0` produces a `FileNotFoundException` naming the assembly that is plainly present on disk.
+
+With it deployed, on the same `--minimal` build that previously failed pips outright:
+
+| | Before | After |
+|---|---|---|
+| Sandbox internal errors raised (`DX10110`) | 8 | 6 |
+| Pips **failed** with `MessageProcessingFailure` | 8 | **0** |
+| Pips that recovered | 0 | **6 of 6** |
+
+And on the full test suite, 909 pips:
+
+| | |
+|---|---|
+| Sandbox internal errors raised | 5 |
+| Pips failed with `MessageProcessingFailure` | **0** |
+| **Disallowed file accesses** | **0** |
+| Remaining failures | 4 `protoc`, 4 `node` — neither a sandbox failure |
+
+Every pip that hit a transient sandbox condition retried and succeeded. Before the fix each one was
+a permanent failure that also skipped everything downstream.
+
+### 17.10 What still fails, and why none of it is the sandbox
+
+Two failures remain on this machine, and both are toolchain or network, not BuildXL:
+
+**`protoc` — grpc ships no arm64 macOS tooling.** `Grpc.Tools` carries `linux_arm64` but no
+`macosx_arm64`, so on Apple silicon `protoc` and `grpc_csharp_plugin` fall back to the x86_64 build
+and need Rosetta 2, which is not installed here. This is a genuine macOS-vs-Linux parity gap that
+has nothing to do with the sandbox: Linux arm64 gets native tooling, macOS arm64 does not.
+`protoc` itself can be replaced with the universal binary from protobuf's own releases, which runs
+natively — but `grpc_csharp_plugin` has no equivalent, and grpc publishes no standalone build of it.
+The broker now reports this in terms that name the cause and the fix rather than "Bad CPU type in
+executable".
+
+**`node` — `registry.npmjs.org` is unreachable from this machine.** Environmental.
+
+So the honest summary: **there are no known sandbox failures left**. Under load the sandbox still
+raises transient internal errors, and those are now absorbed by the retry path that Linux has always
+had — visibly, on real builds, with the pips going on to succeed.
