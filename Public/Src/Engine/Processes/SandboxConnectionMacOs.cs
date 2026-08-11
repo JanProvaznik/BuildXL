@@ -73,6 +73,26 @@ namespace BuildXL.Processes
         public const string BuildXLSupervisionTimeoutEnvVarName = "__BUILDXL_SUPERVISION_TIMEOUT_SECONDS";
 
         /// <summary>
+        /// Where the broker appends one JSON record per pip describing what the sandbox observed.
+        /// </summary>
+        /// <remarks>
+        /// Diagnostic, and off unless the same variable is set in the environment BuildXL itself was
+        /// started with. It is forwarded rather than read directly by the broker because BuildXL does
+        /// not pass its own environment through to pips - a pip's environment is part of its cache key,
+        /// so it is constructed rather than inherited. Without forwarding, setting this on a build has
+        /// no effect and the file is silently never written.
+        ///
+        /// The value is a path the broker opens in append mode, one process per pip, so concurrent
+        /// pips share it safely. Records carry a per-run id and the pip id.
+        ///
+        /// This is how event volume and kernel drop rate get measured on a real build, which is the
+        /// question the macOS sandbox has to answer. See Documentation/Wiki/MacOsSandbox.md.
+        ///
+        /// CODESYNC: Public/Src/Sandbox/MacOs/Sandbox/bxl-es-broker.cpp
+        /// </remarks>
+        public const string BuildXLEvidencePathEnvVarName = "__BUILDXL_MACOS_EVIDENCE_PATH";
+
+        /// <summary>
         /// The broker that wraps every sandboxed root process.
         /// </summary>
         public static readonly string Broker = SandboxedProcessUnix.EnsureDeploymentFile("bxl-es-broker", setExecuteBit: true);
@@ -301,6 +321,15 @@ namespace BuildXL.Processes
                 // The broker gives the tree the pip's own timeout to quiesce after the root exits, so a
                 // hung orphan is reported as a supervision timeout rather than hanging the build.
                 yield return (BuildXLSupervisionTimeoutEnvVarName, ((int)Math.Ceiling(info.Timeout.Value.TotalSeconds)).ToString());
+            }
+
+            string evidencePath = Environment.GetEnvironmentVariable(BuildXLEvidencePathEnvVarName);
+            if (!string.IsNullOrEmpty(evidencePath))
+            {
+                // Forwarded only when explicitly set on the build. This does change the pip's
+                // environment and therefore its fingerprint, which is the correct trade: a diagnostic
+                // that silently altered cache keys would be worse than one that visibly does.
+                yield return (BuildXLEvidencePathEnvVarName, evidencePath);
             }
         }
 
