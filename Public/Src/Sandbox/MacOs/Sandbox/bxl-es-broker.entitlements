@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Entitlements for the macOS sandbox broker.
+
+    com.apple.developer.endpoint-security.client is a *restricted* entitlement: Apple grants it to a
+    named team, and the kernel refuses to create an Endpoint Security client without it
+    (ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED). A signature carrying it is only honoured when it comes
+    from a provisioning profile Apple issued, or when the machine has been told to stop checking -
+    SIP disabled and amfi_get_out_of_my_way=1, which is how this is tested without the grant.
+
+    The build signs the broker with these entitlements ad-hoc so a development machine produces a
+    broker that works. A shipping build has to re-sign with the team's real identity; ad-hoc is not a
+    substitute for the grant, it just makes the entitlement present so a relaxed machine honours it.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.endpoint-security.client</key>
+    <true/>
+</dict>
+</plist>

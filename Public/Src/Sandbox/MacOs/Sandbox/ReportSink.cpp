@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string>
 #include <fcntl.h>
+#include <poll.h>
 #include <string.h>
 #include <unistd.h>
 #include <vector>
@@ -76,21 +77,11 @@ void ReportSink::Close()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    // Everything buffered has to reach the reader before the descriptor goes away, so the deliberate
-    // non-blocking behaviour of FlushLocked is switched off here. This is the one place where
-    // blocking is correct: the observed process has finished, so there is no event queue left to
-    // stall, and a report dropped at this point is a missing dependency in the pip's cache key.
+    // Everything buffered has to reach the reader before the descriptor goes away, so FlushLocked
+    // waits for room here instead of keeping the remainder for a later flush there will not be. The
+    // observed process has finished, so there is no event queue left to stall, and a report dropped
+    // at this point is a missing dependency in the pip's cache key.
     m_drainingToClose = true;
-
-    if (m_fd >= 0)
-    {
-        const int flags = fcntl(m_fd, F_GETFL, 0);
-        if (flags >= 0)
-        {
-            (void)fcntl(m_fd, F_SETFL, flags & ~O_NONBLOCK);
-        }
-    }
-
     FlushLocked();
     if (m_fd >= 0)
     {
@@ -173,6 +164,11 @@ bool ReportSink::Flush()
     return FlushLocked();
 }
 
+// How long the final drain waits for the reader to make room. Generous, because the alternative is
+// discarding reports the pip's cache key depends on, but finite: a reader that has gone away must
+// not hang the build.
+static constexpr int kCloseDrainTimeoutMs = 30000;
+
 bool ReportSink::FlushLocked()
 {
     if (m_fd < 0 || m_pending.empty())
@@ -194,14 +190,30 @@ bool ReportSink::FlushLocked()
                 continue;
             }
 
-            if ((errno == EAGAIN || errno == EWOULDBLOCK) && !m_drainingToClose)
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
+                if (m_drainingToClose)
+                {
+                    // Must not give up: this is a sentinel, or the final drain, and the reader is
+                    // waiting on it. Wait for room rather than spinning, then retry the same write.
+                    struct pollfd waiter = {};
+                    waiter.fd = m_fd;
+                    waiter.events = POLLOUT;
+                    if (poll(&waiter, 1, kCloseDrainTimeoutMs) > 0)
+                    {
+                        continue;
+                    }
+
+                    m_writeFailures++;
+                    m_pending.clear();
+                    return false;
+                }
+
                 // The reader is behind. Keeping the rest buffered and returning is the whole point:
                 // this runs on the drain thread, which is also the only consumer of the event queue,
                 // so blocking here stalls that queue until the delivery thread gives up and taints
                 // the pip. The reports are not lost - they stay in m_pending and go out on the next
-                // flush, or at close, where the descriptor is put back into blocking mode so nothing
-                // is dropped.
+                // flush, or at close, where this branch waits instead.
                 m_pending.erase(m_pending.begin(), m_pending.begin() + static_cast<ptrdiff_t>(written));
                 return true;
             }
@@ -320,7 +332,21 @@ bool ReportSink::WriteSentinel(int32_t sentinel)
     std::lock_guard<std::mutex> lock(m_mutex);
 
     // Sentinels are what unblocks the managed reader, so they are never left sitting in the buffer.
-    return WriteRaw(reinterpret_cast<const char *>(&sentinel), sizeof(sentinel)) && FlushLocked();
+    // FlushLocked is allowed to give up on a short write and keep the remainder for later, which is
+    // right for reports - the drain thread must not stall - but wrong here: a sentinel that stays
+    // buffered is a reader that waits forever, and BuildXL is waiting on this pip. Four bytes on a
+    // path taken twice per pip can afford to block.
+    if (!WriteRaw(reinterpret_cast<const char *>(&sentinel), sizeof(sentinel)))
+    {
+        return false;
+    }
+
+    const bool wasDraining = m_drainingToClose;
+    m_drainingToClose = true;
+    const bool flushed = FlushLocked();
+    m_drainingToClose = wasDraining;
+
+    return flushed;
 }
 
 } // namespace macos

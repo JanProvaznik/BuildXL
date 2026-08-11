@@ -197,6 +197,64 @@ namespace EndpointSecuritySandbox {
             tags: ["compile", "macos", "sandbox"],
         });
 
+        return signBroker(result.getOutputFile(outFile));
+    }
+
+    /**
+     * Signs the broker with the Endpoint Security client entitlement.
+     *
+     * Without this the broker builds fine and then fails at run time with
+     * ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED, and the sandbox silently falls back to interposition -
+     * a working build with quietly weaker observation, which is the worst way for this to go wrong.
+     * The entitlement has to be attached at build time because BuildXL deploys the binary it
+     * produced; anything applied afterwards is discarded on the next build.
+     *
+     * Ad-hoc signing does not grant the entitlement - only Apple does, to a named team. It makes the
+     * entitlement *present*, which is what a machine with SIP disabled and amfi_get_out_of_my_way=1
+     * honours, and what a shipping build re-signs over with the team's real identity.
+     */
+    function signBroker(unsigned: DerivedFile) : DerivedFile {
+        const outDir = Context.getNewOutputDirectory("bxl-es-broker-signed");
+        const outFile = p`${outDir}/bxl-es-broker`;
+        const entitlements = f`bxl-es-broker.entitlements`;
+
+        const result = Transformer.execute({
+            tool: {
+                exe: f`/bin/sh`,
+                dependsOnCurrentHostOSDirectories: true,
+                untrackedDirectoryScopes: MacOsClang.toolchainScopes,
+            },
+            workingDirectory: outDir,
+            arguments: [
+                Cmd.argument("-c"),
+                Cmd.rawArgument('"'),
+                Cmd.argument("cp"),
+                Cmd.argument(Artifact.input(unsigned)),
+                Cmd.argument(Artifact.output(outFile)),
+                Cmd.rawArgument(" && "),
+                // codesign rewrites the file in place, so the copy is made first and signed second.
+                Cmd.argument("/usr/bin/codesign"),
+                Cmd.argument("--force"),
+                Cmd.argument("--sign"),
+                Cmd.argument("-"),
+                Cmd.argument("--entitlements"),
+                Cmd.argument(Artifact.input(entitlements)),
+                Cmd.argument(Artifact.none(outFile)),
+                Cmd.rawArgument('"'),
+            ],
+            // codesign consults the user's keychain and the system trust settings even for an ad-hoc
+            // signature, and writes a resource fork alongside the binary it is signing.
+            unsafe: {
+                untrackedScopes: [
+                    d`/private/var/db`,
+                    d`/private/var/folders`,
+                    ...(Environment.hasVariable("HOME") ? [d`${Environment.getDirectoryValue("HOME")}/Library`] : []),
+                ],
+                untrackedPaths: [outDir],
+            },
+            tags: ["codesign", "macos", "sandbox"],
+        });
+
         return result.getOutputFile(outFile);
     }
 
