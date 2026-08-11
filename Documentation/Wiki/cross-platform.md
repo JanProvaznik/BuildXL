@@ -60,6 +60,10 @@ The 2019 attempt failed on a specific point, and it is worth being precise about
 
 **Event loss, measured.** Under parallel `clang++` compiles the sandbox observes 412,758 events at 64-way concurrency with **zero kernel drops**. The original queue settings did drop - 93,523 events lost at 16-way - and, more tellingly, observed a *third fewer events overall*, which is the 2019 failure exactly: a sandbox that is not coping reports a cleaner build than actually happened. Sizing the queue by measurement removed it. Where the sandbox does still saturate (128-way, far past any real scheduler setting) it fails safe: the pip is tainted and uncacheable rather than silently cached.
 
+**The test suite.** BuildXL's own suite - 909 test pips - runs under the ES sandbox with **zero disallowed file accesses** and **zero sandbox failures**. Transient sandbox conditions still occur under load and are absorbed by the retry path Linux has always had (that path was gated to Linux; macOS now uses it too). Every remaining failure is toolchain or network: `protoc`, because grpc ships `linux_arm64` tooling but no `macosx_arm64` and Rosetta 2 is not installed, and `npm`, because the registry is unreachable from the test machine.
+
+**A separate macOS parity gap worth naming.** grpc publishes native arm64 tooling for Linux and not for macOS. `protoc` can be replaced with protobuf's own universal binary, which runs natively; `grpc_csharp_plugin` has no standalone build anywhere. Until that changes, macOS arm64 builds of anything using grpc need Rosetta 2. This is independent of the sandbox.
+
 **What has not been established.** All measurements come from one machine with SIP and AMFI relaxed, and the C++ targets exercised are small compared to a large production codebase - concurrency has been pushed hard, but a real dependency graph at scale has not.
 
 The macOS sandbox is not supported. It is a working prototype with evidence behind it.
