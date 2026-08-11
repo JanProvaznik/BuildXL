@@ -2397,3 +2397,43 @@ viable where the 2019 one was not.
 These numbers were produced with `Diagnostics/bxl-es-fam.cpp`, which writes a manifest so the broker
 can be run directly on any command. Without it, the broker's own statistics are reachable only
 through a full BuildXL build — which is why they had gone unmeasured for so long.
+
+### 17.7 The test suite, and the one failure that is left
+
+BuildXL's own test suite — `bxl /f:tag='test'`, 909 test pips — was run under the ES backend:
+
+| | |
+|---|---|
+| Succeeded | **238** |
+| **Disallowed file accesses (DX0500)** | **0**, across all 909 pips |
+| Failed — environment | 6 (4 `npm install`, unreachable `registry.npmjs.org`; 2 NuGet packages with no published `osx-arm64` build) |
+| Failed — sandbox | 4, all `LocalQueueOverflow` |
+| Skipped | 661, blocked behind the above |
+
+Zero DFAs is the number that matters most here: across 909 pips of every shape the repository
+contains, the sandbox's file-access reporting produced no false violations at all.
+
+**The 4 sandbox failures are transient, and the fix is retry.** They are different pips on every
+run, which rules out a workload that is inherently too heavy. Three hypotheses were tested and two
+were wrong:
+
+* *Queue too small* — no. A 262144-entry queue peaks at **38** on the same NuGet extraction workload
+  run alone, and 50 concurrent brokers compiling in parallel produced 1,151,743 events with zero
+  drops. The queue is nearly empty when this fires.
+* *Backpressure cap too short* — partly. Raising it from 20 ms to 1 s took overflows from 5 to 1 on a
+  smaller build. The cap had been justified by the Endpoint Security deadline, but the SDK says that
+  deadline governs **auth** events, and this client subscribes to 96 NOTIFY and zero AUTH — so it was
+  guarding a hazard that cannot occur here.
+* *Drain thread starved of CPU* — no. Raising its QoS to `USER_INITIATED` changed nothing (4 before,
+  4 after). The remaining pressure is downstream of the queue, where the drain thread writes into the
+  report FIFO that BuildXL reads.
+
+Which is exactly why **Linux already has a retry for this**: `SandboxedProcessPipExecutor` turns a
+`MessageProcessingFailure` exit code into a retriable `SandboxInternalErrorFailure`. That branch
+tested `IsLinuxOS`, so on macOS the identical failure — produced by the identical code path — was
+permanent, and the log said the pip "may be retried" while it never was. That gate is now fixed.
+
+This is the one result in this document that is verified by inspection rather than by execution: the
+managed build cannot self-host on this machine, because `BuildXL.Tools.AppHostPatcher` has no
+published `osx-arm64` package, so a rebuilt `bxl` cannot be deployed here. The change compiles, and
+mirrors the Linux branch exactly.

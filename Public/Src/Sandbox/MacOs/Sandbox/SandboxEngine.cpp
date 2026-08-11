@@ -7,6 +7,7 @@
 
 #include <libproc.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #include <unistd.h>
 
 namespace buildxl {
@@ -194,6 +195,21 @@ bool SandboxEngine::IsBreakawayExec(const NormalizedEvent &event) const
 
 void SandboxEngine::DrainLoop()
 {
+    // The drain thread is the only consumer of the event queue, so if it is not scheduled promptly
+    // the delivery thread eventually gives up and the pip is tainted. macOS schedules by
+    // quality-of-service class, and a plain std::thread inherits the creating thread's class, which
+    // is not necessarily a responsive one. USER_INITIATED states what is actually true: everything
+    // the observed process does is stalled behind this queue draining.
+    //
+    // Measured honestly: this did *not* change the LocalQueueOverflow rate on a saturated BuildXL
+    // test-suite run (4 pips before and after), so CPU scheduling is not the binding constraint -
+    // the remaining pressure is downstream, where the drain thread writes reports into the FIFO that
+    // BuildXL reads. It is kept because the priority declaration is correct on its own terms, not
+    // because it was shown to fix anything.
+#if defined(__APPLE__)
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
+
     while (true)
     {
         std::deque<NormalizedEvent> batch;
