@@ -2181,29 +2181,180 @@ started at once, on a ten-core machine, produced fence latencies of 11.1–11.9 
 loop converges rather than amplifying, and the extra markers it emits are ~23 events against the
 64,011 a small build already produces.
 
-### 16.7 Disabling AMFI to test ES breaks .NET, and that is the argument for the entitlement
+### 16.7 Disabling AMFI to test ES breaks .NET, and a one-flag patch unblocks it
 
 Relaxing SIP and AMFI is what makes an ad-hoc signature carry the ES entitlement, and §4.5 presents
 it as the way to answer these questions without Apple. It has a consequence that section did not
-anticipate: **with AMFI disabled, no .NET process starts on the machine at all.**
+anticipate: **with AMFI disabled, no .NET process starts on the machine at all.** Every .NET binary,
+`dotnet --version` included, fails with `Failed to create CoreCLR, HRESULT: 0x8007000C`.
 
-Every .NET binary, `dotnet --version` included, fails with `Failed to create CoreCLR, HRESULT:
-0x8007000C`. Tracked down with a `DYLD_INSERT_LIBRARIES` interposer that logs failing memory calls:
-CoreCLR calls `mprotect(PROT_READ|PROT_WRITE)` on a page **inside libcoreclr.dylib's own image**, and
-gets `EACCES` — which is `ERROR_INVALID_ACCESS`, which is `0x8007000C`. That call needs a
-code-signing exemption, and AMFI is what grants exemptions; with AMFI out of the way the entitlement
-mechanism is inert. Signing `dotnet` with `com.apple.security.cs.disable-executable-page-protection`
-changed nothing, which is the confirming evidence rather than a failed fix.
+The mechanism is a segment flag. `libcoreclr.dylib` carries `SG_READ_ONLY` on its `__DATA_CONST`
+segment; dyld honours that by mapping the segment read-only, and CoreCLR writes to it while
+initialising. With AMFI active the write is permitted, and with AMFI disabled it faults. `0x8007000C`
+is `E_OUTOFMEMORY`, which sends you looking for a resource limit that is not the problem.
+
+Clearing that one flag and re-signing ad-hoc makes the runtime start. The
+[`relax-dataconst.py`](../../Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/relax-dataconst.py)
+diagnostic sweeps a set of roots and does this to every CoreCLR it finds.
 
 Ruled out first, each by direct probe: Server GC, `TMPDIR`, `ulimit -n`, OS build drift, `MAP_JIT`,
-the full `pthread_jit_write_protect_np` write/execute cycle, and Mach exception ports.
+the full `pthread_jit_write_protect_np` write/execute cycle, and Mach exception ports. Also ruled
+out afterwards, by holding everything else fixed: the signing authority and the hardened-runtime
+flag are both irrelevant — an ad-hoc signature re-applied with `--options runtime` still fails while
+`SG_READ_ONLY` is set, and Microsoft's own Developer ID signature fails too. Only the flag matters,
+and that holds across .NET 9.0.18 and 11.0-preview.6, for shared frameworks and self-contained
+deployments alike.
 
-**So on one machine you can have the ES sandbox or you can have BuildXL, not both.** The entitlement
-is not bureaucracy; it is the only way to run the sandbox and the engine together, which makes the
-end-to-end measurement — a real BuildXL build on the ES backend — the one thing in this document
-that cannot be produced without Apple. Everything in §16 is measured on the broker directly for that
-reason.
+> An earlier revision of this section concluded the opposite — that the patch was unnecessary,
+> because an unpatched-looking runtime appeared to start. That test was confounded: a self-contained
+> deployment loads the `libcoreclr.dylib` sitting beside it and ignores `--fx-version`, so the
+> experiment had been exercising a still-patched copy. The lesson generalises to anything measured
+> here: on macOS, verify *which* runtime image was loaded, not which one was named.
 
-This inference is strong but not yet closed by experiment: the clean confirmation is a reboot with
-AMFI restored, checking that `dotnet --version` works again *and* that the broker now reports
-`ERR_NOT_ENTITLED`. That is two minutes of work and it is the next thing to do.
+**The earlier conclusion that you can have the ES sandbox or BuildXL but not both was wrong.** With
+the flag cleared, both run on the same machine, and every end-to-end result in this document — a
+real BuildXL build on the ES backend, including the C++ build in §17 — was produced that way.
+
+What remains true is narrower and still worth stating: this is a *workaround for a workaround*. It
+compensates for a local security configuration that only exists because the machine has no ES
+entitlement. On a machine with the entitlement, AMFI stays enabled and none of this applies. The
+entitlement is still required for distribution, and still the one thing here that cannot be
+substituted for locally — but it no longer gates measurement.
+
+---
+
+## 17. End to end: real BuildXL builds on the Endpoint Security backend
+
+Everything before this section measures the broker, or measures the sandbox against a corpus. This
+section is the thing those were standing in for: BuildXL building real targets, with the ES backend
+attached to every pip. It became possible once §16.7's `SG_READ_ONLY` finding let the engine and the
+sandbox run on the same machine.
+
+The results below were produced in one sitting. They are reported in the order they happened,
+including the two occasions where the first answer was wrong, because the corrections are the part
+worth trusting.
+
+### 17.1 What running real builds found that synthetic tests could not
+
+Three defects. Each was invisible to the self test, and each is invisible to the interposition
+backend, because all three come from Endpoint Security reporting *less* than an interposed library
+call does.
+
+**Every file a process read was reported as a file it wrote.** `NOTIFY_CLOSE` arrives for every
+descriptor a process closes, and the translator treated the close itself as the write signal. A
+compiler that opened a header therefore claimed to have produced it. `es_event_close_t` carries a
+`modified` flag; only a modifying close is a write. **151 `DX0500` to 0.**
+
+**Apple's own preferences agent was classified as a sandbox escape.** An XPC connect was an escape
+unless the name began with `com.apple.` *and* the domain was `ES_XPC_DOMAIN_TYPE_SYSTEM`. The
+reasoning was sound — any process can register a name in the user and session domains — but
+`es_xpc_connect_t` carries no identity for the responder, so a name test was all that event could
+do. The kernel does supply that identity, on the `BOOTSTRAP_LOOK_UP` for the same name, as
+`is_platform_binary`; the broker already received it and already used it, just not for XPC. Measured
+on a `dotnet` run: every XPC connect was preceded by a bootstrap lookup for the same name, and
+`com.apple.cfprefsd.agent` — which every process reading a preference contacts, and .NET does at
+startup — is kernel-attested while living in the *user* domain. **148 pips failing to 0.**
+
+The attestation is applied at finalize rather than on arrival, because the bootstrap lookup is
+submitted by launchd: ES describes launchd as the actor and does not order the two events against
+each other, so judging the connect on arrival would make the verdict depend on delivery order. The
+self test pins both orders.
+
+**Directory probes were reported as reads of regular files.** `NOTIFY_LOOKUP` is the one event that
+names a path without saying what is there — `es_event_lookup_t` carries a stat for the *parent* and
+nothing for the target. The defaults said "exists, not a directory", so every directory a tool
+resolved became a file read. That is not cosmetic: BuildXL allows directory probes unconditionally,
+because it has no way to declare a probe-dependency on a directory and "tools tend to emit many such
+innocuous probes" (`PolicyResult_common.cpp`). It surfaced as disallowed accesses on `/`, `/Users`
+and the repository root, because `realpath()` resolves one component at a time. **DFA lists
+collapsed from full ancestor chains to a single real file.**
+
+Two decisions inside that fix are load-bearing:
+
+* **`LOOKUP` is kept, not dropped** — which was the tempting fix, since it is redundant for paths
+  that exist. Measured: a `stat` of an *absent* path emits `NOTIFY_LOOKUP` and **nothing else**, no
+  `STAT`, no `ACCESS`. Dropping it would silently discard exactly the absent-path probes that cache
+  correctness depends on — the 2019 failure, reintroduced deliberately.
+* **Resolution is injected, not called directly.** The first implementation called `lstat` in the
+  engine, which made a replayed corpus depend on the filesystem of the machine replaying it. It
+  showed up as an unrelated-looking fence failure that was nearly dismissed as flaky. It is now
+  `EngineOptions::lookupPathType`, matching the existing `processOrigin` seam, with
+  `NormalizedEvent::sourceTypeKnown` so only the ES ingress — which genuinely cannot know — pays.
+
+### 17.2 The C++ build
+
+C++ is the workload that ended the 2019 attempt, so it is the one that matters. BuildXL's own macOS
+sandbox sources build through BuildXL with real `clang++` pips and real header search, which gives a
+C++ target with no new dependencies.
+
+The first run failed one pip with **`LocalQueueOverflow`** — the broker's queue, not the kernel's,
+but the same volume pressure one layer up. The cause was the directory-probe fix itself: resolving a
+lookup costs a syscall on the drain thread, which is also what the ingress backs up against.
+
+The fix came from noticing that ES already provides the answer for free. A lookup *names the
+directory it resolved in*, and that parent is a directory by construction, so it never needs asking
+about. Recording it turns an ancestor walk into one filesystem call per directory per pip rather
+than one per component per walk — and a compiler re-resolving the same `-I` directories for every
+header in every translation unit pays nothing after the first. Overflow gone.
+
+| | Result |
+|---|---|
+| C++ build under ES | **Build Succeeded**, including the sandbox's own self test running as a sandboxed pip |
+| No-op rebuild | **5 of 6 processes cache hit**, **zero sandbox taints**; the sixth is declared uncacheable by the spec |
+| Self test | 111 → **118 checks, 0 failures** |
+
+### 17.3 The cache-correctness proof
+
+Succeeding and caching are not enough — a sandbox that silently misses probes also succeeds and
+caches, right up until it serves a stale result. The 2019 blocker was specifically that absent-path
+probes are cache inputs and were being lost.
+
+The include search order puts `Sandbox/` before `Linux/`, so a header resolved in `Linux/` was
+probed-and-absent in `Sandbox/` first. Placing a decoy header at that absent path:
+
+* **The cache correctly invalidated.** Pips re-executed and the decoy was picked up (its `#error`
+  fired). A sandbox that had not observed the absent probe would have reported a cache hit and built
+  stale output.
+* **Removing it restored the full cache hit**, 5 of 6, so the invalidation was precise rather than a
+  blanket miss.
+
+This is the direct test of the requirement the 2019 attempt could not meet, and it passes.
+
+### 17.4 A product gap this surfaced
+
+`PipGraph.UnixDefaults` untracked `/System/Library` but nothing else under `/System`. **Cryptexes
+postdate that list** — Apple now ships parts of the OS, including the dyld shared cache, in cryptexes
+so they can be replaced without a full OS update, and every process reads from them before it runs a
+single instruction of the tool. Every pip on a current macOS reported undeclared reads of
+`/System/Cryptexes/OS`, `/System/Cryptexes/Rosetta`, and the shared cache under Preboot.
+
+Both `/System/Cryptexes` and `/System/Volumes/Preboot/Cryptexes` are now untracked, for the same
+reason `/usr/lib` is: which OS libraries a process loads is not deterministic across runs, so sealing
+them would make identical builds look different. `/System` is deliberately *not* untracked wholesale
+— `/System/Volumes/Data` is a firmlink to the data volume, and that would untrack every user file
+reached through it.
+
+This is a real gap in BuildXL's macOS support, independent of which sandbox backend is used.
+
+### 17.5 What this does and does not establish
+
+Established:
+
+* The ES backend runs real BuildXL builds, including C++, and caches them correctly.
+* Absent-path probes — the 2019 blocker — are observed, and demonstrably drive invalidation.
+* Loss is detectable. `global_seq_num` (message version ≥ 4) did not exist on macOS 10.15, so the
+  2019 prototype could not tell it was dropping events. The broker now requires it and refuses to
+  trust an older stream, which turns a correctness failure into a performance failure: a lossy run
+  is uncacheable, never wrong.
+
+Not established:
+
+* **Kernel drop rate on a large build has not been measured.** Evidence capture is opt-in via
+  `__BUILDXL_MACOS_EVIDENCE_PATH`, which BuildXL scrubs from pip environments, so no real build has
+  recorded it. This is the most important remaining gap and it is a plumbing task, not a research
+  one.
+* **Scale.** The C++ target here is a handful of translation units. Whether a large C++ codebase
+  stays within budget is unanswered — but it is now a *measurable* question rather than a blocking
+  one, because loss can no longer pass silently.
+* Everything was measured on one machine, with SIP and AMFI relaxed. Nothing observed suggests those
+  settings affect ES event delivery, but nothing rules it out either.
