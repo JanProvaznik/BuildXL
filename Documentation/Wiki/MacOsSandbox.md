@@ -2433,7 +2433,36 @@ Which is exactly why **Linux already has a retry for this**: `SandboxedProcessPi
 tested `IsLinuxOS`, so on macOS the identical failure — produced by the identical code path — was
 permanent, and the log said the pip "may be retried" while it never was. That gate is now fixed.
 
-This is the one result in this document that is verified by inspection rather than by execution: the
-managed build cannot self-host on this machine, because `BuildXL.Tools.AppHostPatcher` has no
-published `osx-arm64` package, so a rebuilt `bxl` cannot be deployed here. The change compiles, and
-mirrors the Linux branch exactly.
+### 17.8 The osx-arm64 build blocker, and what it was hiding
+
+"BuildXL cannot be built on osx-arm64" turns out to reduce to a single missing file.
+`BuildXL.Tools.AppHostPatcher` publishes `tools/win-x64`, `tools/linux-x64` and `tools/osx-x64` —
+and no `tools/osx-arm64`. The patcher runs on the *host*, so on Apple silicon the osx-x64 build is
+unusable without Rosetta, and `AppHostPatcher.dsc` resolves `tools/osx-arm64/AppHostPatcher`
+directly. Every managed pip depends on it, so the managed build stops before it starts.
+
+Nothing had to be invented: the tool's source is already in the repository, at
+`Public/Sdk/Public/Managed/Tools/AppHostPatcher`.
+[`Diagnostics/apphostpatcher-local-feed.sh`](../../Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/apphostpatcher-local-feed.sh)
+rebuilds it, packs it under the id and version `config.dsc` already asks for, and writes a package a
+local NuGet v3 feed can serve. **The AppHostPatcher pips, which previously could not run at all, now
+execute and succeed during a real build.**
+
+Two details cost real time and are worth recording. The package must also carry empty placeholders
+for the other three platforms, because BuildXL's generated package spec enumerates every file the
+published package contains and fails the download pip if any is missing. And the payload has to be
+passed through `relax-dataconst.py` *before* packing — it is a self-contained .NET app and inherits
+the same `__DATA_CONST` problem as every other CoreCLR here, and BuildXL re-extracts the package, so
+a patch applied afterwards is discarded.
+
+With that unblocked, the managed build runs far enough to expose the real capacity limit, which had
+been hidden behind it. On a near-cold cache — where almost every pip executes at once, the worst
+case this machine can produce — tainted pips went **19 → 10** after the report-sink fix in §17.7.
+Those builds have 0–5% cache hits precisely because each change invalidates fingerprints; a normal
+incremental build runs at 40–90% hits with far less concurrency, which is why the C++ build and
+warm rebuilds pass cleanly.
+
+The remaining honest statement: under maximum concurrent load the sandbox still taints a small
+number of pips, always safely (uncacheable, never wrong), and the retry path is the designed answer
+for exactly that. The retry fix itself is verified by compilation and by mirroring the Linux branch,
+not yet by observing a retry succeed end to end.
