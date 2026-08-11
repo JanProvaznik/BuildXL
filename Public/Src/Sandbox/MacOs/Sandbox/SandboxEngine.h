@@ -156,18 +156,26 @@ struct EngineOptions
     /**
      * Longest a delivery thread may wait for queue space before giving up and tainting.
      *
-     * Dropping an event costs the whole pip, so it is worth waiting; missing an Endpoint Security
-     * deadline costs the whole client, so the wait must stay small. Callers that know the real
-     * remaining deadline pass it to OnEvent and this acts only as the upper bound.
+     * Dropping an event costs the whole pip, so it is worth waiting. The reason not to wait forever
+     * is not Endpoint Security - it is that a wedged report reader on the BuildXL side would
+     * otherwise stall the observed process indefinitely, with no diagnostic. This cap is that
+     * backstop, and nothing else.
      *
-     * 2000us was too small to ride out a scheduling hiccup under load: at 8 concurrent compiles it
-     * gave up 16 times and the kernel dropped those events. 20000us eliminated that entirely at the
-     * same concurrency, and is still an order of magnitude inside the NOTIFY deadline. It does not
-     * rescue a queue that is genuinely too small - at 16 compiles with the old capacity, drops rose
-     * rather than fell - which is the evidence that capacity and backpressure fix different
-     * failures, and why both were needed.
+     * It is deliberately generous because this client subscribes to NOTIFY events only, and the SDK
+     * is explicit that the message deadline is the time "before which an *auth* event must be
+     * responded to". With no AUTH subscription there is no deadline to miss and no client to be
+     * killed, so a short cap buys no safety - it only converts a scheduling delay into a failed pip.
+     *
+     * Measured on a real BuildXL build: at 2000us, and again at 20000us, NuGet extraction pips
+     * failed with LocalQueueOverflow while the machine was saturated (50 concurrent pips, 97% CPU).
+     * The queue was not full - a 262144-entry queue peaked at 38 on the same workload run alone.
+     * The delivery thread simply was not rescheduled within the cap. Waiting instead of giving up
+     * costs nothing when the drain thread is merely late, which is the common case under load.
+     *
+     * A caller that does know a real deadline still passes it to OnEvent, and the smaller of the two
+     * wins, so this remains an upper bound rather than a floor.
      */
-    std::chrono::microseconds maxEnqueueBackpressure{20000};
+    std::chrono::microseconds maxEnqueueBackpressure{1000000};
 
     /** How long to wait for a fence marker before giving up and tainting. */
     std::chrono::milliseconds fenceTimeout{5000};

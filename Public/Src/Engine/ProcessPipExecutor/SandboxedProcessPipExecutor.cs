@@ -1611,13 +1611,19 @@ namespace BuildXL.ProcessPipExecutor
                 }
                 case SandboxedProcessPipExecutionStatus.ExecutionFailed:
                 {
-                    if (OperatingSystemHelper.IsLinuxOS)
+                    if (OperatingSystemHelper.IsLinuxOS || OperatingSystemHelper.IsMacOS)
                     {
                         // The failure could also be due to an internal error with the sandbox.
                         if (processResult.ExitCode == ExitCodes.MessageProcessingFailure)
                         {
                             // Encountered a retriable error on the sandbox. If retries are available, then this pip will be retried.
                             // Error message already logged on the SandboxedProcessUnix level.
+                            //
+                            // macOS reaches this the same way Linux does - SandboxedProcessUnix sets the exit code when the
+                            // native sandbox reports an infrastructure error - so the condition that makes it retriable is
+                            // identical. Excluding macOS meant a transient condition, such as the broker's event queue
+                            // briefly overflowing while the machine is saturated, permanently failed the pip and skipped
+                            // everything downstream, even though the log said it "may be retried".
                             return SandboxedProcessPipExecutionResult.SandboxInternalErrorFailure(pipExecutionExecutionResult);
                         }
                     }
@@ -1961,9 +1967,9 @@ namespace BuildXL.ProcessPipExecutor
                 loggingSuccess = false;
             }
 
-            if (OperatingSystemHelper.IsLinuxOS && result.ExitCode == ExitCodes.MessageProcessingFailure)
+            if ((OperatingSystemHelper.IsLinuxOS || OperatingSystemHelper.IsMacOS) && result.ExitCode == ExitCodes.MessageProcessingFailure)
             {
-                // On Linux, a MessageProcessingFailure exit code indicates a sandbox internal error (e.g., an infra error reported
+                // On Linux and macOS, a MessageProcessingFailure exit code indicates a sandbox internal error (e.g., an infra error reported
                 // by the native sandbox). ValidateSandboxCommunication will turn this into a SandboxInternalErrorFailure result, so
                 // the pip will be retried. We must not log the PipProcessError (DX0064) here: if the retry succeeds, the build would
                 // be considered successful while errors had already been logged, which is a catastrophic build failure
