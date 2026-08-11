@@ -615,7 +615,22 @@ int main(int argc, char **argv)
 
     if (spawnResult != 0)
     {
-        Fail("cannot launch '%s': %s", argv[1], strerror(spawnResult));
+        if (spawnResult == EBADARCH)
+        {
+            // "Bad CPU type in executable" on its own sends people looking for a corrupt binary.
+            // The real cause is almost always an x86_64-only tool on Apple silicon with Rosetta 2
+            // absent - which is a live case for BuildXL, because grpc publishes linux_arm64 tooling
+            // but no macosx_arm64, so protoc and grpc_csharp_plugin fall back to the x64 build.
+            Fail("cannot launch '%s': the executable has no slice for this machine's architecture. "
+                 "If it is an x86_64 binary on Apple silicon, Rosetta 2 is required: "
+                 "softwareupdate --install-rosetta",
+                 argv[1]);
+        }
+        else
+        {
+            Fail("cannot launch '%s': %s", argv[1], strerror(spawnResult));
+        }
+
         engine.Shutdown();
         ingress->Stop();
         sink.WriteDebugMessage(
