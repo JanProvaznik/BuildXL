@@ -2349,12 +2349,51 @@ Established:
 
 Not established:
 
-* **Kernel drop rate on a large build has not been measured.** Evidence capture is opt-in via
-  `__BUILDXL_MACOS_EVIDENCE_PATH`, which BuildXL scrubs from pip environments, so no real build has
-  recorded it. This is the most important remaining gap and it is a plumbing task, not a research
-  one.
-* **Scale.** The C++ target here is a handful of translation units. Whether a large C++ codebase
-  stays within budget is unanswered — but it is now a *measurable* question rather than a blocking
-  one, because loss can no longer pass silently.
 * Everything was measured on one machine, with SIP and AMFI relaxed. Nothing observed suggests those
   settings affect ES event delivery, but nothing rules it out either.
+* The BuildXL C++ target here is a handful of translation units. §17.6 measures event volume far
+  past it, but on synthetic parallelism rather than a real large codebase's dependency graph.
+
+### 17.6 Kernel drop rate, measured
+
+This is the question the 2019 attempt failed on and that this document could not answer until now:
+under a real C++ workload, does Endpoint Security drop events?
+
+It does — with the settings this design started with. Measured on parallel `clang++` compiles, since
+C++ header search is what produces path-resolution events in bulk:
+
+| queue capacity | concurrent compiles | events observed | kernel drops |
+|---|---|---|---|
+| 16384 | 8 | 51,796 | 16 |
+| 16384 | 16 | 69,708 | 93,523 |
+| 16384 | 32 | 98,788 | 248,264 |
+| 262144 | 16 | **103,407** | **0** |
+| 262144 | 32 | **206,725** | **0** |
+| 262144 | 64 | **412,758** | **0** |
+| 262144 | 128 | 636,738 | 429,827 |
+
+**Read the event column, not just the drop column.** At 16 concurrent compiles the deeper queue
+observes 103,407 events where the shallow one observed 69,708. The shallow queue was not coping and
+reporting less — it was losing a third of the stream and would have reported a *cleaner* build than
+actually happened. That is the 2019 failure mode precisely, and the only reason it is visible at all
+is `global_seq_num`, which macOS 10.15 did not have.
+
+Two different failures, needing two different fixes. 2000 µs of backpressure was too small to absorb
+a scheduling hiccup — at 8 compiles the delivery thread gave up 16 times — and raising it to
+20000 µs eliminated those completely. But at 16 compiles the same change made things *worse*, because
+no amount of waiting rescues a queue that is genuinely too small. Only the deeper queue fixed the
+higher concurrencies.
+
+The cost is near zero, because the queue grows on demand rather than being preallocated: a single
+`clang++` compile still peaks at **34 queue slots and 7 MB resident**. And 64 concurrent processes
+inside *one pip's* tree is already an order of magnitude past what a scheduler produces on this
+machine's 6 performance cores — BuildXL parallelises across pips, each with its own broker, not
+within one.
+
+Where it still breaks — 128-way — it breaks *safely*: `KernelSequenceGap+LocalQueueOverflow`, the pip
+is tainted and uncacheable. Slower, never wrong. That distinction is the whole reason this design is
+viable where the 2019 one was not.
+
+These numbers were produced with `Diagnostics/bxl-es-fam.cpp`, which writes a manifest so the broker
+can be run directly on any command. Without it, the broker's own statistics are reachable only
+through a full BuildXL build — which is why they had gone unmeasured for so long.

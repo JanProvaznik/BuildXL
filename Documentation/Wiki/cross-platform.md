@@ -58,6 +58,8 @@ The 2019 attempt failed on a specific point, and it is worth being precise about
 
 **What has been demonstrated.** Building the sandbox's own C++ sources through BuildXL under Endpoint Security succeeds; a no-op rebuild is a full cache hit with no sandbox taints; and creating a file at a path the compiler had probed and found absent correctly invalidates the cache, while removing it restores the hit. That last check is the direct test of the requirement the 2019 attempt could not meet.
 
-**What has not been established.** Kernel drop rate has not yet been measured on a large build, and the workloads exercised so far are small. Whether the event volume of a large C++ codebase is tractable is the open question; it is now a measurable one rather than a blocking one, because loss can no longer pass silently.
+**Event loss, measured.** Under parallel `clang++` compiles the sandbox observes 412,758 events at 64-way concurrency with **zero kernel drops**. The original queue settings did drop - 93,523 events lost at 16-way - and, more tellingly, observed a *third fewer events overall*, which is the 2019 failure exactly: a sandbox that is not coping reports a cleaner build than actually happened. Sizing the queue by measurement removed it. Where the sandbox does still saturate (128-way, far past any real scheduler setting) it fails safe: the pip is tainted and uncacheable rather than silently cached.
+
+**What has not been established.** All measurements come from one machine with SIP and AMFI relaxed, and the C++ targets exercised are small compared to a large production codebase - concurrency has been pushed hard, but a real dependency graph at scale has not.
 
 The macOS sandbox is not supported. It is a working prototype with evidence behind it.
