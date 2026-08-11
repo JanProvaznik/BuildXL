@@ -2506,13 +2506,30 @@ still pass with quietly weaker observation. Substituting for it locally requires
 (§16.7), so every .NET runtime on the machine needs patching. **Nothing else on this list needs
 Apple.**
 
-**2. BuildXL built from source on osx-arm64 produces a deployment that hangs.** *Unresolved.*
-Pips launch, their processes exit, and BuildXL waits forever: `DX10101` shows
-`Ext:True Out:True Err:True Rep:False` — stdout and stderr complete, reports never do — with no
-broker process alive. Reproduced twice; the LKG-based deployment runs the identical spec in 38
-seconds. The broker is not implicated: built from the same source it drives a `clang++` compile
-standalone and exits 0. This is the blocker to chase next, because it is what stands between "the
-sandbox works" and "the product builds itself here".
+**2. BuildXL built from source on osx-arm64 produces a deployment that hangs.** *Unresolved, but
+narrowed to one assembly and one point in the sequence.*
+
+Bisected by swapping single assemblies into a working deployment: **`BuildXL.Processes.dll` alone
+reproduces it.** In a hung run the log shows `Saved FAM to ...` and `Created FIFO at ...` for each
+pip, and then nothing — **the child process is never launched**. No broker process ever exists, no
+`clang` ever runs, and `DX10101` reports `Ext:True Out:True Err:True Rep:False`. The FIFOs are on
+disk with no writer.
+
+The broker is not implicated: built from the same source it drives a `clang++` compile standalone
+and exits 0. Nor is it the report sink or the ES client, since neither is reached.
+
+Worth stating plainly: the working deployment's `BuildXL.Processes.dll` is 46 KB smaller than the
+freshly built one, so it predates several of the managed-side commits in this work. **The managed
+sandbox connection in its current form has therefore never actually run** — every measurement in
+this document was taken with an older `BuildXL.Processes.dll` driving a current broker. The sandbox
+results stand, because the broker is what produces them, but the managed wiring needs this fixed
+before any of it runs in CI.
+
+One real bug was found while chasing this and is fixed: `SandboxConnectionMacOs` sent the pip's
+supervision timeout as `__BUILDXL_SUPERVISION_TIMEOUT_SECONDS` while the broker reads
+`__BUILDXL_MACOS_SUPERVISION_TIMEOUT_SECONDS`, despite a `CODESYNC` comment pairing them. The name
+never matched, so the pip's own timeout was ignored and every pip got the 600-second default —
+turning what should be a prompt supervision failure into a ten-minute stall.
 
 **3. `BuildXL.Tools.AppHostPatcher` has no `osx-arm64` build.** Every managed pip depends on it, so
 the managed build cannot start. Worked around by rebuilding from the in-repo source

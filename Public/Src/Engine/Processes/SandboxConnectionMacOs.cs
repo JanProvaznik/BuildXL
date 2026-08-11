@@ -70,7 +70,7 @@ namespace BuildXL.Processes
         /// <remarks>
         /// CODESYNC: Public/Src/Sandbox/MacOs/Sandbox/bxl-es-broker.cpp
         /// </remarks>
-        public const string BuildXLSupervisionTimeoutEnvVarName = "__BUILDXL_SUPERVISION_TIMEOUT_SECONDS";
+        public const string BuildXLSupervisionTimeoutEnvVarName = "__BUILDXL_MACOS_SUPERVISION_TIMEOUT_SECONDS";
 
         /// <summary>
         /// Where the broker appends one JSON record per pip describing what the sandbox observed.
