@@ -2493,7 +2493,50 @@ And on the full test suite, 909 pips:
 Every pip that hit a transient sandbox condition retried and succeeded. Before the fix each one was
 a permanent failure that also skipped everything downstream.
 
-### 17.10 What still fails, and why none of it is the sandbox
+### 17.10 What blocks this from running in macOS CI today
+
+Ordered by what would stop a CI fleet first. Everything here was hit and measured on a real machine,
+not predicted.
+
+**1. The Endpoint Security entitlement — external, and the only true hard blocker.**
+`com.apple.developer.endpoint-security.client` is restricted; Apple grants it to a named team. Without
+it `es_new_client` returns `ERR_NOT_ENTITLED` and the sandbox falls back to interposition, so builds
+still pass with quietly weaker observation. Substituting for it locally requires SIP disabled *and*
+`amfi_get_out_of_my_way=1`, which no CI fleet should run — and which additionally breaks CoreCLR
+(§16.7), so every .NET runtime on the machine needs patching. **Nothing else on this list needs
+Apple.**
+
+**2. BuildXL built from source on osx-arm64 produces a deployment that hangs.** *Unresolved.*
+Pips launch, their processes exit, and BuildXL waits forever: `DX10101` shows
+`Ext:True Out:True Err:True Rep:False` — stdout and stderr complete, reports never do — with no
+broker process alive. Reproduced twice; the LKG-based deployment runs the identical spec in 38
+seconds. The broker is not implicated: built from the same source it drives a `clang++` compile
+standalone and exits 0. This is the blocker to chase next, because it is what stands between "the
+sandbox works" and "the product builds itself here".
+
+**3. `BuildXL.Tools.AppHostPatcher` has no `osx-arm64` build.** Every managed pip depends on it, so
+the managed build cannot start. Worked around by rebuilding from the in-repo source
+(§17.8); the real fix is the publishing pipeline's `osx-arm64` leg.
+
+**4. grpc ships no arm64 macOS tooling.** `Grpc.Tools` carries `linux_arm64` but no `macosx_arm64`
+(checked 2.71.0 and 2.82.0), so `protoc` and `grpc_csharp_plugin` fall back to x86_64 and require
+Rosetta 2. With Rosetta installed this stops mattering — the minimal build goes from 193 to **323
+succeeded pips**. Without it, every grpc pip fails. `protoc` alone can be replaced with protobuf's
+universal binary; `grpc_csharp_plugin` has no standalone build anywhere.
+
+**5. Transient sandbox overflow under load — mitigated, not eliminated.** The sandbox still raises
+`LocalQueueOverflow` when the machine is saturated. These are now absorbed by the retry path (§17.9)
+and fail safe when they are not, but a CI fleet would see occasional retries rather than a clean run.
+
+**Fixed here, and worth noting because each would have blocked CI on its own:** the broker was built
+unsigned, so even an entitled team would have shipped one that silently fell back to interposition;
+the retry path was gated to Linux, making every transient sandbox condition permanent; and the report
+sink blocked the event-queue drain thread.
+
+Not blockers, environment-specific to this machine: `registry.npmjs.org` is unreachable, so four
+JavaScript graph-builder pips cannot pass here.
+
+### 17.11 What still fails, and why none of it is the sandbox
 
 Two failures remain on this machine, and both are toolchain or network, not BuildXL:
 
