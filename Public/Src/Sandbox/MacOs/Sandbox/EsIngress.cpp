@@ -43,6 +43,23 @@ inline bool IsDirectory(const es_file_t *file)
     return S_ISDIR(file->stat.st_mode);
 }
 
+/**
+ * Whether the path this es_file_t describes actually exists.
+ *
+ * Endpoint Security delivers events such as STAT and ACCESS for paths that are not there - that is
+ * the whole point of a failed stat - and fills the stat structure with zeros when it cannot resolve
+ * the target. st_mode is never zero for anything that exists, so it is the signal.
+ *
+ * This matters because BuildXL distinguishes a read from a probe by whether the target exists, and a
+ * probe of an absent path is an input to the pip's cache key. NormalizedEvent defaults to "exists",
+ * so without this an absent-path stat was reported as a read of a regular file - which
+ * FileAccessExplicitReportingTest catches as "expected Probe, found Read".
+ */
+inline bool Exists(const es_file_t *file)
+{
+    return file->stat.st_mode != 0;
+}
+
 inline ProcessIdentity IdentityOf(const audit_token_t &token)
 {
     ProcessIdentity identity;
@@ -279,6 +296,7 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.sourcePath = TokenToString(event.open.file->path);
             out.sourcePathTruncated = event.open.file->path_truncated;
             out.sourceIsDirectory = IsDirectory(event.open.file);
+            out.sourceExists = Exists(event.open.file);
             // The access mode decides whether this is a read or a write dependency, and O_ACCMODE is
             // the only part of fflag that is meaningful for that decision.
             out.error = event.open.fflag;
@@ -438,6 +456,7 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.sourcePath = TokenToString(event.stat.target->path);
             out.sourcePathTruncated = event.stat.target->path_truncated;
             out.sourceIsDirectory = IsDirectory(event.stat.target);
+            out.sourceExists = Exists(event.stat.target);
             break;
 
         case ES_EVENT_TYPE_NOTIFY_ACCESS:
@@ -445,6 +464,7 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.sourcePath = TokenToString(event.access.target->path);
             out.sourcePathTruncated = event.access.target->path_truncated;
             out.sourceIsDirectory = IsDirectory(event.access.target);
+            out.sourceExists = Exists(event.access.target);
             break;
 
         case ES_EVENT_TYPE_NOTIFY_GETATTRLIST:
@@ -452,6 +472,7 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.sourcePath = TokenToString(event.getattrlist.target->path);
             out.sourcePathTruncated = event.getattrlist.target->path_truncated;
             out.sourceIsDirectory = IsDirectory(event.getattrlist.target);
+            out.sourceExists = Exists(event.getattrlist.target);
             break;
 
         case ES_EVENT_TYPE_NOTIFY_SETATTRLIST:
