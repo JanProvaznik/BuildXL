@@ -261,7 +261,14 @@ std::vector<char> ManifestBuilder::Build() const
 {
     std::vector<char> payload;
 
-    // 1. Debug flag. Release layout, because that is what this file is compiled as.
+    // 1. Debug flag. Release layout, and the self test is compiled to match.
+    //
+    // _DEBUG is not a debugging preference in this format, it selects a different wire layout:
+    // GENERATE_TAG gives every manifest struct an extra leading tag word under _DEBUG
+    // (DetoursServices/DataTypes.h). The broker must therefore be built to match the BuildXL that
+    // writes its manifests, and it is. The self test both writes and reads its own manifests and
+    // never sees one from the managed side, so it is built without _DEBUG and both halves agree.
+    // CODESYNC: Public/Src/Engine/Processes/FileAccessManifest.cs (CheckedCode.DebugOn/DebugOff)
     AppendUint32(payload, 0xDB600000);
 
     // 2. Injection timeout, in minutes. Must be positive.

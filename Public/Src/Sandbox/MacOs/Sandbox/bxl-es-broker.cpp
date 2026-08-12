@@ -254,11 +254,22 @@ bool WaitForTree(pid_t rootPid, std::chrono::seconds timeout, int &exitCode)
     return false;
 }
 
+// CODESYNC: Public/Src/Engine/Processes/FileAccessManifest.cs (CheckedCode.DebugOn/DebugOff)
 // CODESYNC: Public/Src/Sandbox/Windows/DetoursServices/DataTypes.h (ManifestDebugFlag_t)
-// A release-mode manifest starts with the 32-bit word 0xDB600000.
-bool LooksLikeReleaseManifest(const std::vector<char> &bytes)
+//
+// A manifest opens with a 32-bit word saying which configuration wrote it, and the two sides must
+// agree: BuildXL writes DebugOn when it is built Debug (FileAccessManifest.WriteDebugFlagBlock,
+// under #if DEBUG) and the native side is expected to match under #ifdef _DEBUG.
+//
+// Accepting only the release word was wrong and produced a confusing failure rather than a clear
+// one: a debug build of BuildXL writes a debug manifest, the broker refused it and exited before
+// opening the report FIFO, and BuildXL - already blocked reading that FIFO - waited forever. A
+// self-hosted debug build could therefore never run a single pip, and it looked like a hang rather
+// than a mismatch.
+bool LooksLikeValidManifest(const std::vector<char> &bytes)
 {
-    constexpr uint32_t kReleaseManifestDebugFlag = 0xDB600000;
+    constexpr uint32_t kManifestDebugOff = 0xDB600000;
+    constexpr uint32_t kManifestDebugOn = 0xDB600001;
 
     if (bytes.size() < sizeof(uint32_t))
     {
@@ -267,7 +278,15 @@ bool LooksLikeReleaseManifest(const std::vector<char> &bytes)
 
     uint32_t flag = 0;
     memcpy(&flag, bytes.data(), sizeof(flag));
-    return flag == kReleaseManifestDebugFlag;
+
+    // Matched against this broker's own configuration, so a genuine mismatch is still caught: the
+    // rest of the manifest is laid out differently between the two, so reading on regardless would
+    // turn a clear error into a parse that silently produces the wrong policy.
+#ifdef _DEBUG
+    return flag == kManifestDebugOn;
+#else
+    return flag == kManifestDebugOff;
+#endif
 }
 
 /**
@@ -453,9 +472,11 @@ int main(int argc, char **argv)
     // a blob that is not a manifest. A truncated or half-written manifest file is a realistic failure,
     // so check the leading debug-flag word here and turn it into an actionable message rather than an
     // abort trap with no context.
-    if (!LooksLikeReleaseManifest(famBytes))
+    if (!LooksLikeValidManifest(famBytes))
     {
-        Fail("the file at '%s' is not a valid release-mode file access manifest (%zu bytes)",
+        Fail("the file at '%s' is not a file access manifest this broker can read (%zu bytes). "
+             "BuildXL and the sandbox must be built in the same configuration: a Debug BuildXL "
+             "writes a Debug manifest, which only a broker compiled with _DEBUG accepts.",
              famPathRaw,
              famBytes.size());
         return kBrokerFailureExitCode;

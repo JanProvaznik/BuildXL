@@ -293,6 +293,32 @@ namespace BuildXL.Processes
 
             public void Dispose()
             {
+                // Unblock the reader before removing the FIFO. A thread sitting in open(O_RDONLY) on
+                // a FIFO waits for a writer and nothing else - deleting the path does not release it,
+                // and neither does closing a handle it has not obtained yet. Opening the write end
+                // for an instant is what wakes it: it then sees an immediate end of stream and the
+                // loop exits.
+                //
+                // Without this, any pip whose process never starts hangs the whole build rather than
+                // failing: the scheduler finishes, calls Thread.Join on this reader, and waits
+                // forever. That is a launch failure turning into a silent hang, which is far worse
+                // than the failure it is hiding.
+                //
+                // O_NONBLOCK matters on this side too, so that a reader which has already gone does
+                // not leave this open() waiting in its place.
+                try
+                {
+                    var wakeHandle = IO.Open(ReportsFifoPath, IO.OpenFlags.O_WRONLY | IO.OpenFlags.O_NONBLOCK, 0);
+                    if (!wakeHandle.IsInvalid)
+                    {
+                        wakeHandle.Dispose();
+                    }
+                }
+                catch (Exception)
+                {
+                    // The FIFO may already be gone, which is the case where there is nothing to wake.
+                }
+
                 Analysis.IgnoreResult(FileUtilities.TryDeleteFile(ReportsFifoPath, retryOnFailure: false));
                 Analysis.IgnoreResult(FileUtilities.TryDeleteFile(FamPath, retryOnFailure: false));
             }

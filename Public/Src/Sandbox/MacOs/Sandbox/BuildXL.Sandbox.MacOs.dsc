@@ -169,6 +169,14 @@ namespace EndpointSecuritySandbox {
             Cmd.argument("-D_DARWIN_C_SOURCE"),
             Cmd.argument(qualifier.configuration === "debug" ? "-O0" : "-O2"),
             Cmd.flag("-g", qualifier.configuration === "debug"),
+            // _DEBUG is not a debugging convenience here, it decides a wire format. The managed side
+            // writes a "debug" file access manifest when BuildXL itself is built Debug
+            // (FileAccessManifest.WriteDebugFlagBlock, under #if DEBUG), and the native side rejects a
+            // manifest whose flag does not match its own build (ManifestDebugFlag::CheckValid, under
+            // #ifdef _DEBUG). Without this the two disagree for every debug build: the broker exits
+            // with "not a valid release-mode file access manifest" before it opens the report FIFO,
+            // and BuildXL then waits forever for reports that can never arrive.
+            Cmd.flag("-D_DEBUG", qualifier.configuration === "debug"),
             Cmd.options("-I", includeDirectories.map(d => Artifact.none(d))),
             Cmd.argument("-lEndpointSecurity"),
             // audit_token_to_pid and friends live in libbsm.

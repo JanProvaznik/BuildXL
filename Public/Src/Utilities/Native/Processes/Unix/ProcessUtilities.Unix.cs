@@ -29,7 +29,25 @@ namespace BuildXL.Native.Processes.Unix
     /// </summary>
     public class ProcessUtilitiesUnix : IProcessUtilities
     {
-        private static bool s_isDebugModeEnabled = false;
+        /// <summary>
+        /// Whether the native sandbox was built in the debug configuration.
+        /// </summary>
+        /// <remarks>
+        /// Defaults to the managed build's own configuration rather than to false. On Unix the native
+        /// sandbox is built from this same tree, by the same build, under the same qualifier, so a
+        /// Debug BuildXL is paired with a Debug sandbox - and the manifest wire format depends on the
+        /// two agreeing (FileAccessManifest.WriteDebugFlagBlock).
+        ///
+        /// It was unconditionally false, and nothing ever called SetNativeConfiguration, so every
+        /// debug build on Unix reported "A debug BuildXL is using a non-debug DetoursServices.dll"
+        /// against a sandbox that was in fact debug.
+        /// </remarks>
+        private static bool s_isDebugModeEnabled =
+#if DEBUG
+            true;
+#else
+            false;
+#endif
 
         /// <inheritdoc />
         public void SetNativeConfiguration(bool isDebugMode)
