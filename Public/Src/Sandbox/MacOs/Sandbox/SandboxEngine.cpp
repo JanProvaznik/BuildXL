@@ -307,6 +307,15 @@ void SandboxEngine::ProcessEvent(const NormalizedEvent &event)
 
     std::vector<SandboxEvent> translated;
 
+    if (event.op == NormOp::kLookup && IsLauncherPath(event.sourcePath))
+    {
+        // The kernel resolved the launcher's script on this process's behalf during its exec
+        // transition. The pip never touched it. See EngineOptions::launcherPaths.
+        m_stats.launcherPathsIgnored++;
+        m_stats.eventsProcessed++;
+        return;
+    }
+
     if (event.op == NormOp::kLookup)
     {
         // Free knowledge: a lookup happens *in* a directory, so its parent is one whether or not the
@@ -494,6 +503,24 @@ void SandboxEngine::Shutdown()
                 + std::to_string(SequenceTracker::kMaximumKnownMessageVersion)
                 + "; fields read by the broker are ABI-stable so the stream is still trusted.");
     }
+}
+
+bool SandboxEngine::IsLauncherPath(const std::string &path) const
+{
+    if (path.empty() || m_options.launcherPaths.empty())
+    {
+        return false;
+    }
+
+    for (const std::string &launcher : m_options.launcherPaths)
+    {
+        if (path == launcher)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void SandboxEngine::ResolveLookupTarget(NormalizedEvent &event)

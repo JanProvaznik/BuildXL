@@ -74,6 +74,9 @@ struct EngineStatistics
      */
     uint64_t deferredDelegations = 0;
 
+    /** Path resolutions dropped because they name a launcher artifact. See EngineOptions::launcherPaths. */
+    uint64_t launcherPathsIgnored = 0;
+
     size_t queueHighWaterMark = 0;
 
     /** Enqueues that had to wait for the drain thread, and the total time spent waiting. */
@@ -226,6 +229,26 @@ struct EngineOptions
     std::function<ProcessOrigin(const ProcessIdentity &)> processOrigin;
 
     /**
+     * Paths the kernel resolves on a pip's behalf that the pip never touched.
+     *
+     * macOS resolves the path of an ancestor shell's script during the exec transition of every
+     * descendant, and Endpoint Security reports that resolution against the process being exec'd.
+     * Proven rather than inferred: running `/usr/bin/true` under the broker from a shell script
+     * produces a lookup of that script, immediately after NOTIFY_EXEC and before dyld has resolved
+     * anything - the program had not executed a single instruction and cannot have probed it - and
+     * launching the identical broker with no script ancestor produces no such event at all.
+     *
+     * Left unfiltered this is not cosmetic: BuildXL launches every build from bxl.sh, so every pip
+     * reports an undeclared probe of it, every such pip fails, and everything downstream of them is
+     * skipped. Measured on a no-op build: 19 disallowed accesses, all of them this, failing 15 pips
+     * and skipping 182.
+     *
+     * Only pure path resolutions are dropped. If a pip genuinely opens or reads one of these paths,
+     * that is a real dependency and is still reported.
+     */
+    std::vector<std::string> launcherPaths;
+
+    /**
      * Decides what is actually at a path a LOOKUP names.
      *
      * Endpoint Security reports the path a lookup resolved but nothing about what it found, and the
@@ -331,6 +354,9 @@ private:
 
     /** Fills in what is actually at a LOOKUP's path, which Endpoint Security does not report. */
     void ResolveLookupTarget(NormalizedEvent &event);
+
+    /** Whether a path is one the kernel resolves on the pip's behalf rather than one it touched. */
+    bool IsLauncherPath(const std::string &path) const;
     bool IsBreakawayExec(const NormalizedEvent &event) const;
     void AddTaint(TaintReason reason);
 

@@ -3,6 +3,17 @@
 set -e
 
 MY_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# macOS resolves an ancestor shell script's path during the exec transition of every descendant, and
+# Endpoint Security attributes that resolution to the process being exec'd. Since every pip in the
+# build is a descendant of this script, every pip would otherwise report an undeclared probe of it.
+# Telling the sandbox which path is ours lets it drop those resolutions; a pip that genuinely opens
+# the file is still reported. Appended rather than assigned so a wrapping script can add its own.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    __BUILDXL_MACOS_LAUNCHER_PATHS="${__BUILDXL_MACOS_LAUNCHER_PATHS:+$__BUILDXL_MACOS_LAUNCHER_PATHS:}$MY_DIR/$(basename "${BASH_SOURCE[0]}")"
+    export __BUILDXL_MACOS_LAUNCHER_PATHS
+fi
+
 source "$MY_DIR/Public/Src/App/Bxl/Unix/env.sh"
 
 # Log the final exit code of this script whenever it exits. This helps diagnose cases where the

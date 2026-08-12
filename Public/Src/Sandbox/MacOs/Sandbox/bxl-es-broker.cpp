@@ -72,6 +72,12 @@ constexpr const char *kSupervisionTimeoutEnvVar = "__BUILDXL_MACOS_SUPERVISION_T
  */
 constexpr const char *kBackendEnvVar = "__BUILDXL_MACOS_SANDBOX_BACKEND";
 
+/**
+ * Colon-separated paths the kernel resolves on a pip's behalf rather than paths a pip touched.
+ * BuildXL sets this to the shell script that launched the build. See EngineOptions::launcherPaths.
+ */
+constexpr const char *kLauncherPathsEnvVar = "__BUILDXL_MACOS_LAUNCHER_PATHS";
+
 /** Exit code used when the broker itself fails, distinct from any plausible tool exit code. */
 constexpr int kBrokerFailureExitCode = 253;
 
@@ -143,6 +149,38 @@ std::vector<char> ReadWholeFile(const std::string &path, std::string &errorMessa
 
     fclose(file);
     return contents;
+}
+
+std::vector<std::string> ReadLauncherPaths()
+{
+    std::vector<std::string> paths;
+
+    const char *raw = getenv(kLauncherPathsEnvVar);
+    if (raw == nullptr || *raw == '\0')
+    {
+        return paths;
+    }
+
+    const std::string value(raw);
+    size_t start = 0;
+    while (start <= value.size())
+    {
+        const size_t end = value.find(':', start);
+        const std::string entry = value.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!entry.empty())
+        {
+            paths.push_back(entry);
+        }
+
+        if (end == std::string::npos)
+        {
+            break;
+        }
+
+        start = end + 1;
+    }
+
+    return paths;
 }
 
 std::string MakeNoncePath()
@@ -549,13 +587,16 @@ int main(int argc, char **argv)
 
     const std::string noncePath = MakeNoncePath();
 
+    EngineOptions engineOptions;
+    engineOptions.launcherPaths = ReadLauncherPaths();
+
     SandboxEngine engine(
         &manifest,
         &sink,
         ingress->BrokerIdentity(),
         noncePath,
         [&ingress](const std::string &nonce) { return ingress->EmitMarker(nonce); },
-        EngineOptions());
+        std::move(engineOptions));
 
     engine.Start();
     enginePointer.store(&engine, std::memory_order_release);

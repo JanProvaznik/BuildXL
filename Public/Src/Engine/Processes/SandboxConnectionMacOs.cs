@@ -93,6 +93,18 @@ namespace BuildXL.Processes
         public const string BuildXLEvidencePathEnvVarName = "__BUILDXL_MACOS_EVIDENCE_PATH";
 
         /// <summary>
+        /// Colon-separated paths that macOS resolves on a pip's behalf rather than paths a pip touched.
+        /// </summary>
+        /// <remarks>
+        /// macOS resolves an ancestor shell script's path during the exec transition of every descendant,
+        /// and Endpoint Security attributes that resolution to the process being exec'd. Since BuildXL is
+        /// normally launched from bxl.sh, every pip would otherwise report an undeclared probe of it.
+        /// The launcher tells us its own path; we pass it to each broker so it can drop those resolutions.
+        /// Only pure path resolutions are dropped - a pip that genuinely opens the file is still reported.
+        /// </remarks>
+        public const string BuildXLLauncherPathsEnvVarName = "__BUILDXL_MACOS_LAUNCHER_PATHS";
+
+        /// <summary>
         /// The broker that wraps every sandboxed root process.
         /// </summary>
         public static readonly string Broker = SandboxedProcessUnix.EnsureDeploymentFile("bxl-es-broker", setExecuteBit: true);
@@ -347,6 +359,12 @@ namespace BuildXL.Processes
                 // The broker gives the tree the pip's own timeout to quiesce after the root exits, so a
                 // hung orphan is reported as a supervision timeout rather than hanging the build.
                 yield return (BuildXLSupervisionTimeoutEnvVarName, ((int)Math.Ceiling(info.Timeout.Value.TotalSeconds)).ToString());
+            }
+
+            string launcherPaths = Environment.GetEnvironmentVariable(BuildXLLauncherPathsEnvVarName);
+            if (!string.IsNullOrEmpty(launcherPaths))
+            {
+                yield return (BuildXLLauncherPathsEnvVarName, launcherPaths);
             }
 
             string evidencePath = Environment.GetEnvironmentVariable(BuildXLEvidencePathEnvVarName);
