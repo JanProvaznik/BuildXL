@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#include <errno.h>
 #include <sys/stat.h>
 
 #include "AccessChecker.h"
@@ -37,12 +38,26 @@ SandboxEvent EventTranslator::MakeEvent(
     const std::string &sourcePath,
     const std::string &destinationPath) const
 {
+    // BuildXL decides whether the target existed from the errno, not from the mode: IsNonexistent is
+    // `Error == ERROR_FILE_NOT_FOUND || Error == ERROR_PATH_NOT_FOUND` (ReportedFileAccess.cs), and
+    // that answer feeds ACL decisions and tells a probe of an absent path from a read of a present
+    // one. Endpoint Security reports these operations as having succeeded - a stat that finds
+    // nothing is a successful stat - so nothing would otherwise carry the information across, and
+    // every absent path was reported as one that exists.
+    //
+    // A real errno always wins; this only fills in the case where there is none.
+    uint reportedError = static_cast<uint>(event.error);
+    if (reportedError == 0 && !event.sourceExists && !sourcePath.empty())
+    {
+        reportedError = static_cast<uint>(ENOENT);
+    }
+
     SandboxEvent sandboxEvent = SandboxEvent::AbsolutePathSandboxEvent(
         NormOpName(event.op),
         eventType,
         static_cast<pid_t>(event.self.pid),
         static_cast<pid_t>(event.parent.pid),
-        static_cast<uint>(event.error),
+        reportedError,
         sourcePath,
         destinationPath);
 

@@ -298,8 +298,10 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
             out.sourceIsDirectory = IsDirectory(event.open.file);
             out.sourceExists = Exists(event.open.file);
             // The access mode decides whether this is a read or a write dependency, and O_ACCMODE is
-            // the only part of fflag that is meaningful for that decision.
-            out.error = event.open.fflag;
+            // the only part of fflag that is meaningful for that decision. It goes in its own field:
+            // `error` is an errno to BuildXL, so putting flags there reported an open for writing as
+            // EPERM.
+            out.openFlags = static_cast<uint32_t>(event.open.fflag);
             break;
 
         case ES_EVENT_TYPE_NOTIFY_CLOSE:

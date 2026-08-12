@@ -180,8 +180,22 @@ struct NormalizedEvent
     /** For NOTIFY events, whether the underlying operation succeeded. */
     bool succeeded = true;
 
-    /** errno for failed operations, 0 when unknown or successful. */
+    /**
+     * errno for failed operations, 0 when unknown or successful.
+     *
+     * BuildXL reads this to decide whether the target existed: ReportedFileAccess.IsNonexistent is
+     * `Error == ERROR_FILE_NOT_FOUND || Error == ERROR_PATH_NOT_FOUND`, and that answer feeds ACL
+     * decisions. Anything other than a real errno here is therefore not a cosmetic inaccuracy.
+     */
     int32_t error = 0;
+
+    /**
+     * Open flags, for the events that carry them. Not an errno.
+     *
+     * These used to be stuffed into `error`, where BuildXL read them as one: an open for writing
+     * (O_WRONLY, 1) was reported as errno 1, EPERM.
+     */
+    uint32_t openFlags = 0;
 
     ProcessIdentity self;
     ProcessIdentity parent;
