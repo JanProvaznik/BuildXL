@@ -2506,30 +2506,46 @@ still pass with quietly weaker observation. Substituting for it locally requires
 (§16.7), so every .NET runtime on the machine needs patching. **Nothing else on this list needs
 Apple.**
 
-**2. BuildXL built from source on osx-arm64 produces a deployment that hangs.** *Unresolved, but
-narrowed to one assembly and one point in the sequence.*
+**2. Self-hosting on osx-arm64 — fixed.** *Was: a deployment that hung with no error.*
 
-Bisected by swapping single assemblies into a working deployment: **`BuildXL.Processes.dll` alone
-reproduces it.** In a hung run the log shows `Saved FAM to ...` and `Created FIFO at ...` for each
-pip, and then nothing — **the child process is never launched**. No broker process ever exists, no
-`clang` ever runs, and `DX10101` reports `Ext:True Out:True Err:True Rep:False`. The FIFOs are on
-disk with no writer.
+The cause was a wire-format mismatch, not Endpoint Security. `_DEBUG` selects a different manifest
+layout - `GENERATE_TAG` gives every manifest struct an extra leading tag word, and the first word
+records which configuration wrote the file. The macOS sandbox was never compiled with `_DEBUG`, so a
+Debug BuildXL wrote a manifest its own broker could not read.
 
-The broker is not implicated: built from the same source it drives a `clang++` compile standalone
-and exits 0. Nor is it the report sink or the ES client, since neither is reached.
+How it failed is why it took so long to find. The broker rejected the manifest and exited *before*
+opening the report FIFO; BuildXL was already parked in `open()` on the read end, which waits for a
+writer and cannot be interrupted by deleting the path or by cancellation. So it waited forever. A
+self-hosted debug build could not run a single pip and presented as a hang with no error. Bisecting
+deployments implicated `BuildXL.Processes.dll`, which was true but misleading - the working
+deployment simply happened to be a Release build.
 
-Worth stating plainly: the working deployment's `BuildXL.Processes.dll` is 46 KB smaller than the
-freshly built one, so it predates several of the managed-side commits in this work. **The managed
-sandbox connection in its current form has therefore never actually run** — every measurement in
-this document was taken with an older `BuildXL.Processes.dll` driving a current broker. The sandbox
-results stand, because the broker is what produces them, but the managed wiring needs this fixed
-before any of it runs in CI.
+Four fixes, each necessary: compile the broker with `_DEBUG` under the debug qualifier (the
+interpose library and self test are excluded - neither reads a manifest from the managed side);
+check the manifest word against the broker's own configuration and say plainly what mismatched;
+report the native configuration on Unix from the managed build's own (nothing ever called
+`SetNativeConfiguration`, so every debug build claimed "a debug BuildXL is using a non-debug
+DetoursServices.dll" about a sandbox that was in fact debug); and open the FIFO's write end for an
+instant in `Dispose` so a reader parked in `open()` is released - without which *any* pip that fails
+to launch hangs the whole build rather than failing.
 
-One real bug was found while chasing this and is fixed: `SandboxConnectionMacOs` sent the pip's
-supervision timeout as `__BUILDXL_SUPERVISION_TIMEOUT_SECONDS` while the broker reads
-`__BUILDXL_MACOS_SUPERVISION_TIMEOUT_SECONDS`, despite a `CODESYNC` comment pairing them. The name
-never matched, so the pip's own timeout was ignored and every pip got the 600-second default —
-turning what should be a prompt supervision failure into a ten-minute stall.
+**Verified end to end.** A fully self-hosted BuildXL - freshly built `BuildXL.Processes.dll`,
+`BuildXL.Native.dll` and broker - builds itself and its own sandbox:
+
+| | |
+|---|---|
+| `--minimal` build | **2381 pips succeeded, 0 failed** except 4 network-blocked `npm` |
+| Pips observed by the ES backend | **496** |
+| Disallowed file accesses | **0** |
+| Sandbox failures | **0** |
+| Sandbox spec built by the self-hosted engine | **Build Succeeded** |
+
+The test suite now genuinely runs: **717 pips succeeded** where 238 did before, because everything
+downstream of the managed build had previously been blocked. Of the remaining failures, **zero are
+disallowed file accesses**; 7 are the transient sandbox condition surfacing *inside* integration
+tests, which run their own sandboxed processes and so do not benefit from BuildXL's pip-level retry;
+4 are `npm` against an unreachable registry; the rest are ordinary test failures (grpc connectivity,
+a missing native library, argument parsing).
 
 **3. `BuildXL.Tools.AppHostPatcher` has no `osx-arm64` build.** Every managed pip depends on it, so
 the managed build cannot start. Worked around by rebuilding from the in-repo source
