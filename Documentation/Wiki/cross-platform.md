@@ -66,7 +66,7 @@ The 2019 attempt failed on a specific point, and it is worth being precise about
 
 **A separate macOS parity gap worth naming.** grpc publishes native arm64 tooling for Linux and not for macOS. `protoc` can be replaced with protobuf's own universal binary, which runs natively; `grpc_csharp_plugin` has no standalone build anywhere. Until that changes, macOS arm64 builds of anything using grpc need Rosetta 2. This is independent of the sandbox.
 
-**What it costs.** 22% on real `clang++` compiles (2918 ms to 3566 ms for ten). About half of that is a fixed ~34 ms per-process broker startup rather than observation throughput, so it amortises across parallelism and is worst on builds made of many very short pips.
+**What it costs.** 16.4% on real `clang++` compiles, with a fixed **13 ms per process**. That fixed part is what BuildXL pays once per pip, so it is the number that matters; it amortises across parallelism and is worst on builds of many very short pips. It was 22% and 37 ms before tuning - almost all of the startup cost turned out to be the sandbox's own fence protocol rather than anything Endpoint Security imposes (creating an ES client is 0.4 ms).
 
 **What has not been established.** All measurements come from one machine with SIP and AMFI relaxed, and the C++ targets exercised are small compared to a large production codebase - concurrency has been pushed hard, but a real dependency graph at scale has not.
 

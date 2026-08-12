@@ -2579,22 +2579,38 @@ path: the absent path now reports `errno 2` (ENOENT), the present one `0`, both 
 
 Measured on real `clang++` compiles, same work with and without the sandbox:
 
-| | |
+| | Before tuning | After |
+|---|---|---|
+| 10 compiles, unsandboxed | 2918 ms | 2846 ms |
+| 10 compiles, under Endpoint Security | 3566 ms | 3312 ms |
+| **Overhead** | 22% | **16.4%** |
+| **Fixed cost per process** | 37 ms | **13 ms** |
+
+The fixed cost is the number that matters, because BuildXL runs one broker per pip: it is paid by
+every process in the build, whatever that process does.
+
+Where it goes was measured in phases rather than guessed, and the two obvious answers were both
+wrong. Creating and tearing down an Endpoint Security client is **0.4 ms** - not the floor anyone
+would assume. The manifest parse, report sink and process spawn are under a millisecond between
+them. **25 of the 28 ms was the fence protocol**, 18.5 ms of it in the opening fence alone.
+
+The fence exists because ES will not flush a nearly idle NOTIFY queue promptly, so the marker is
+chased with re-emissions rather than waited on - and the *interval* between those re-emissions was
+the cost, not the marker. Shortening it turns out to be nearly free, because the number of
+re-emissions does not change with the interval (measured: 18 attempts and 86 events at both 250 µs
+and 100 µs, identical). Only latency differs:
+
+| Re-emit interval | Broker overhead over `/usr/bin/true` |
 |---|---|
-| 10 compiles, unsandboxed | 2918 ms |
-| 10 compiles, under Endpoint Security | 3566 ms |
-| **Overhead** | **22%, ~65 ms per process** |
+| 1000 µs | ~28 ms |
+| 250 µs | ~9.6 ms |
+| **100 µs** | **~6.6 ms** |
+| 50 µs | ~5.5 ms |
 
-Decomposed, because the shape matters more than the percentage: the broker's *fixed* cost - create
-an ES client, run the fence protocol, tear down - is **~34 ms per launch**, measured by running it
-over `/usr/bin/true`. So roughly half the overhead is per-process startup and the rest scales with
-event volume (~6,300 events for one of these compiles).
-
-That has a clear implication for whether this is usable: the cost is dominated by a per-pip constant,
-not by observation throughput, so it amortises across parallelism and hurts most on builds made of
-very many very short pips. It is also the number to attack first if it needs to come down - the fence
-protocol is the largest single component of it and was already measured at ~250 ms when Endpoint
-Security is idle, which is why it is chased with re-emitted markers rather than waited on.
+So the cost is a per-pip constant rather than an observation-throughput problem: it amortises across
+parallelism and hurts most on builds of very many very short pips. At 13 ms it is unlikely to be the
+thing that decides adoption, and if it needs to go lower the remaining fence time is still the place
+to look.
 
 The rest are ordinary failures: 4 `npm` against an unreachable registry, plus grpc connectivity, a
 missing native library, and argument parsing.
