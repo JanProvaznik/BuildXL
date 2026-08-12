@@ -121,7 +121,7 @@ public:
      * Blocks until the protocol reaches the desired state, fails, or the timeout expires.
      * Returns true only for the desired state.
      */
-    bool WaitFor(State desired, std::chrono::milliseconds timeout) const;
+    bool WaitFor(State desired, std::chrono::microseconds timeout) const;
 
     /** Marks the protocol failed because a marker was never observed. */
     void MarkTimedOut();

@@ -78,7 +78,7 @@ bool FenceProtocol::BeginClosure()
     return EmitMarker();
 }
 
-bool FenceProtocol::WaitFor(State desired, std::chrono::milliseconds timeout) const
+bool FenceProtocol::WaitFor(State desired, std::chrono::microseconds timeout) const
 {
     std::unique_lock<std::mutex> lock(m_mutex);
     m_changed.wait_for(lock, timeout, [this, desired] {

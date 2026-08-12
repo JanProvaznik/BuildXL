@@ -193,7 +193,23 @@ struct EngineOptions
      * Backends that deliver their marker synchronously - the replay source pumps its whole corpus
      * inside the emitter - satisfy the first wait and never re-emit.
      */
-    std::chrono::milliseconds fenceReemitInterval{1};
+    std::chrono::microseconds fenceReemitInterval{100};
+
+    // Sub-millisecond because this interval, not the marker itself, is what the fence costs. Endpoint
+    // Security will not flush a nearly idle NOTIFY queue promptly, so the marker is chased with
+    // re-emissions rather than waited on - and the number of re-emissions it takes does not change
+    // with the interval (measured: 18 attempts at both 250us and 100us, and the same 86 events), so
+    // shortening it is a pure latency win with no extra work.
+    //
+    // Measured broker overhead over /usr/bin/true, which is almost entirely this fence:
+    //
+    //     1000us   ~28 ms
+    //      250us   ~9.6 ms
+    //      100us   ~6.6 ms
+    //       50us   ~5.5 ms
+    //
+    // 100us is where the curve flattens. This matters because BuildXL runs one broker per pip, so
+    // this is a fixed per-pip cost paid by every process in the build.
 
     /** How many times to retry an unobserved fence marker. */
     uint32_t maxFenceAttempts = 3;
