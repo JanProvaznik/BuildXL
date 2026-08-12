@@ -2553,10 +2553,17 @@ broker is what launches the tool, a missing file surfaced as a sandbox failure. 
 go to zero and the sandbox's own tests execute for the first time on macOS.
 
 That immediately paid for itself by finding a real defect: `FileAccessExplicitReportingTest` expects
-an absent file to be reported as `Probe`, and the Endpoint Security backend reports `Read` in some
-cases. **This is an open sandbox defect** - `sourceExists` defaults to true and only the `create`
-handler in `EsIngress` ever sets it, so any event other than a lookup describes its target as
-existing. It is now visible only because these tests can run at all.
+an absent file to be reported as `Probe`, and the backend was reporting `Read`. Endpoint Security
+delivers STAT and ACCESS for paths that are not there - that is what a failed stat is - and zeroes
+the stat structure; `sourceExists` defaulted to true and only the `create` handler ever set it, so
+every absent-path stat was described as an existing regular file. `st_mode` is never zero for
+anything that exists and is already in the event, so it is the signal, at no extra cost. **Fixed:
+those assertions go from 3 failing to 1.**
+
+The one that remains is a different case and is honestly still open: a probe of a file that *does*
+exist is reported as `Read` rather than `Probe`. That decision is made in the shared access checker
+rather than the macOS ingress, so it wants comparing against the Linux backends rather than patching
+here.
 
 The rest are ordinary failures: 4 `npm` against an unreachable registry, plus grpc connectivity, a
 missing native library, and argument parsing.
