@@ -39,7 +39,23 @@ namespace TestProcess {
                 ];
             case "osx-x64":
             case "osx-arm64":
-                return [];
+                // The subfolder must be the name Dispatch.CurrentOS() produces, because
+                // ProcessesTestBase composes the path as TestProcess/<CurrentOS>/<tool>. This branch
+                // deployed nothing while macOS was unsupported, so every test that launches the test
+                // process failed with "No such file or directory" - reported as a sandbox failure,
+                // since the broker is what could not launch it.
+                // CODESYNC: Public/Src/Engine/UnitTests/ProcessesTestBase/ProcessesTestBase.cs
+                return [
+                    {
+                        subfolder: r`TestProcess/MacOS`,
+                        contents: [
+                            $.withQualifier({
+                                targetFramework: "net9.0",
+                                targetRuntime: qualifier.targetRuntime
+                            }).testProcessExe
+                        ]
+                    }
+                ];
             case "linux-x64":
                 return [
                     {
