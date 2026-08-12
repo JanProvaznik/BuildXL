@@ -2552,18 +2552,49 @@ platform was unsupported - while `ProcessesTestBase` composes the path as
 broker is what launches the tool, a missing file surfaced as a sandbox failure. Fixed; those seven
 go to zero and the sandbox's own tests execute for the first time on macOS.
 
-That immediately paid for itself by finding a real defect: `FileAccessExplicitReportingTest` expects
-an absent file to be reported as `Probe`, and the backend was reporting `Read`. Endpoint Security
-delivers STAT and ACCESS for paths that are not there - that is what a failed stat is - and zeroes
-the stat structure; `sourceExists` defaulted to true and only the `create` handler ever set it, so
-every absent-path stat was described as an existing regular file. `st_mode` is never zero for
-anything that exists and is already in the event, so it is the signal, at no extra cost. **Fixed:
-those assertions go from 3 failing to 1.**
+That immediately paid for itself by finding two real correctness defects, both now fixed.
 
-The one that remains is a different case and is honestly still open: a probe of a file that *does*
-exist is reported as `Read` rather than `Probe`. That decision is made in the shared access checker
-rather than the macOS ingress, so it wants comparing against the Linux backends rather than patching
-here.
+**Absent paths were reported as existing.** BuildXL does not read existence from the mode - it reads
+it from the errno (`ReportedFileAccess.IsNonexistent`), and that answer feeds ACL decisions.
+Endpoint Security reports these operations as *successful*, because they are: a stat that finds
+nothing is a successful stat. So nothing carried the information across. This is the direction that
+matters for caching - a probe of a path that is not there is an input to the pip's cache key,
+because the build behaves differently once the file appears.
+
+**Open flags were reported as an errno.** The `OPEN` handler assigned `fflag` to the `error` field,
+which BuildXL reads as an errno, so an open for writing (`O_WRONLY`, 1) was reported as errno 1,
+`EPERM`. Nothing ever consumed the flags from there.
+
+Measured on the tests that found them:
+
+| Assertion | Before | After |
+|---|---|---|
+| `Element 'Probe' not found` | 3 failing | **0** |
+| `Bad assumption on file existence` | 4 failing | **0** |
+
+Confirmed directly too, running the broker over a program that stats one absent and one present
+path: the absent path now reports `errno 2` (ENOENT), the present one `0`, both as `Probe`.
+
+### 17.12 What it costs
+
+Measured on real `clang++` compiles, same work with and without the sandbox:
+
+| | |
+|---|---|
+| 10 compiles, unsandboxed | 2918 ms |
+| 10 compiles, under Endpoint Security | 3566 ms |
+| **Overhead** | **22%, ~65 ms per process** |
+
+Decomposed, because the shape matters more than the percentage: the broker's *fixed* cost - create
+an ES client, run the fence protocol, tear down - is **~34 ms per launch**, measured by running it
+over `/usr/bin/true`. So roughly half the overhead is per-process startup and the rest scales with
+event volume (~6,300 events for one of these compiles).
+
+That has a clear implication for whether this is usable: the cost is dominated by a per-pip constant,
+not by observation throughput, so it amortises across parallelism and hurts most on builds made of
+very many very short pips. It is also the number to attack first if it needs to come down - the fence
+protocol is the largest single component of it and was already measured at ~250 ms when Endpoint
+Security is idle, which is why it is chased with re-emitted markers rather than waited on.
 
 The rest are ordinary failures: 4 `npm` against an unreachable registry, plus grpc connectivity, a
 missing native library, and argument parsing.
