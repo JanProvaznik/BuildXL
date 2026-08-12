@@ -2541,11 +2541,25 @@ to launch hangs the whole build rather than failing.
 | Sandbox spec built by the self-hosted engine | **Build Succeeded** |
 
 The test suite now genuinely runs: **717 pips succeeded** where 238 did before, because everything
-downstream of the managed build had previously been blocked. Of the remaining failures, **zero are
-disallowed file accesses**; 7 are the transient sandbox condition surfacing *inside* integration
-tests, which run their own sandboxed processes and so do not benefit from BuildXL's pip-level retry;
-4 are `npm` against an unreachable registry; the rest are ordinary test failures (grpc connectivity,
-a missing native library, argument parsing).
+downstream of the managed build had previously been blocked. **Zero of the remaining failures are
+disallowed file accesses.**
+
+One correction, because the first reading of those failures was wrong. Seven were attributed to a
+transient sandbox condition on the grounds that they carried the sandbox's exit code. They were not:
+`TestProcess`'s deployment definition returned an empty list for macOS - left over from when the
+platform was unsupported - while `ProcessesTestBase` composes the path as
+`TestProcess/<Dispatch.CurrentOS()>/<tool>`. The file was simply never deployed, and because the
+broker is what launches the tool, a missing file surfaced as a sandbox failure. Fixed; those seven
+go to zero and the sandbox's own tests execute for the first time on macOS.
+
+That immediately paid for itself by finding a real defect: `FileAccessExplicitReportingTest` expects
+an absent file to be reported as `Probe`, and the Endpoint Security backend reports `Read` in some
+cases. **This is an open sandbox defect** - `sourceExists` defaults to true and only the `create`
+handler in `EsIngress` ever sets it, so any event other than a lookup describes its target as
+existing. It is now visible only because these tests can run at all.
+
+The rest are ordinary failures: 4 `npm` against an unreachable registry, plus grpc connectivity, a
+missing native library, and argument parsing.
 
 **3. `BuildXL.Tools.AppHostPatcher` has no `osx-arm64` build.** Every managed pip depends on it, so
 the managed build cannot start. Worked around by rebuilding from the in-repo source
