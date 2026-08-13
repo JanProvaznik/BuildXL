@@ -2690,6 +2690,17 @@ is deliberately narrow: only pure lookups are dropped, so a pip that genuinely o
 still reported. Verified directly — `cat`ing the launcher under the sandbox still produces its `open`
 record while the spurious `lookup` is gone.
 
+**The filter has to be symlink-aware, and this nearly shipped broken.** Endpoint Security reports
+physically resolved paths, and the first version of this fix compared them to the configured path
+literally. On macOS that is not a corner case: `/tmp` and `/var` are themselves symlinks into
+`/private`, and bash's `pwd` returns the *logical* path, so `bxl.sh` was handing the broker a path
+the kernel would never report. Measured directly - passing `/tmp/x/o.sh` leaves the spurious probe
+in place, passing `/private/tmp/x/o.sh` removes it. A repository under any symlinked path would have
+reverted to failing every pip, and silently, because a filter that never matches looks exactly like
+a filter that has nothing to do. Fixed on both sides, since either alone is fragile: `bxl.sh`
+resolves with `pwd -P`, and the broker canonicalizes whatever it is given with `realpath`, so a CI
+wrapper that sets the variable itself is also correct.
+
 **Measured, on the full minimal build, through `bxl.sh`:**
 
 | | Before | After |
