@@ -2655,3 +2655,84 @@ executable".
 So the honest summary: **there are no known sandbox failures left**. Under load the sandbox still
 raises transient internal errors, and those are now absorbed by the retry path that Linux has always
 had — visibly, on real builds, with the pips going on to succeed.
+
+### 17.13 The launcher's own script was being charged to every pip
+
+Everything above measures cost. This section is about the thing that was destroying the *benefit*,
+and it went unnoticed for a long time because it does not look like a sandbox bug.
+
+On a no-op rebuild of the minimal build, 15 pips failed and 182 more were skipped behind them. Every
+one of the 19 disallowed accesses was the same path — `bxl.sh`, the shell script that launches the
+build — reported as an undeclared probe by pips that have no business knowing it exists: `rsync`,
+`protoc`, `cp`.
+
+**What it actually is.** macOS resolves an ancestor shell's script path during the exec transition of
+every descendant, and Endpoint Security attributes that resolution to the process being exec'd. Two
+experiments settle it beyond argument:
+
+- Run `/usr/bin/true` under the broker from a shell script. The lookup of that script appears
+  immediately after `NOTIFY_EXEC` and *before* dyld has resolved anything. `/usr/bin/true` had not
+  executed a single instruction at that point and cannot have probed anything.
+- Launch the identical broker with no script ancestor (`bash -c` rather than a script file). The
+  event does not occur at all — 0 occurrences, versus 1 per process launch.
+
+So it is the kernel's bookkeeping, charged to the pip.
+
+**Why it mattered so much.** Every pip in a BuildXL build is a descendant of `bxl.sh`. A pip whose
+manifest does not declare the repository root — which is most tool pips — therefore reported an
+undeclared read on *every single execution*. Those pips fail, and a failed pip's outputs are never
+stored in the cache, so everything downstream of them is skipped. The build could not complete, and
+the parts that did complete could not be cached.
+
+**The fix.** The launcher tells the sandbox its own path (`__BUILDXL_MACOS_LAUNCHER_PATHS`, set by
+`bxl.sh` and forwarded to each broker), and the broker drops *path resolutions* naming it. The filter
+is deliberately narrow: only pure lookups are dropped, so a pip that genuinely opens the file is
+still reported. Verified directly — `cat`ing the launcher under the sandbox still produces its `open`
+record while the spurious `lookup` is gone.
+
+**Measured, on the full minimal build, through `bxl.sh`:**
+
+| | Before | After |
+|---|---|---|
+| Disallowed accesses | 19 (all `bxl.sh`) | **0** |
+| Process pips succeeded | 151 | **324** |
+| Failed | 15 | **0** |
+| Skipped | 182 | **0** |
+
+The root cause was independently confirmed before the fix existed, by predicting and then observing
+that invoking `bxl` directly — with no shell script in its ancestry — makes all 19 disappear.
+
+### 17.14 What the win actually is
+
+The honest question a reviewer should ask is not "does the sandbox work" but "does this make macOS
+builds fast". Measured on the sandbox's own C++ build (8 pips, real `clang++`, running under the
+Endpoint Security backend), each number is a full `bxl` invocation measured end to end:
+
+| Scenario | Wall time | Cache hits |
+|---|---|---|
+| Build after a source change to a shared file | 36 s | 3 / 8 |
+| **No-op rebuild** | **3 s** | **8 / 8 (100%)** |
+| Single-file change (`Taint.cpp`) | 20 s | 2 / 8 |
+| **Revert that change** | **3 s** | **8 / 8 (100%)** |
+
+Two results matter here.
+
+**The no-op rebuild is 3 seconds and 100% cache hits.** That is the number that says the sandbox is
+not just correct but *usable*: observing every file access of every process costs little enough that
+a developer's inner loop is dominated by the work that actually changed.
+
+**Reverting a change returns instantly to 100% hits.** This is the property a timestamp-based build
+system cannot have. `make`, `ninja` and Xcode all decide staleness from mtimes, so undoing an edit
+makes files *newer* and forces a full rebuild of everything downstream. BuildXL keys on content, so
+the revert is recognised as work already done. On this workload that is 3 seconds against 20.
+
+The same convergence holds on a larger, mixed C#/native closure (`BuildXL.Processes.dsc`, 133 pips).
+Run to run, cache hits climbed 70 → 82 → 101 → 104 as the graph settled, ending at **104 of 104
+succeeding pips served from cache**. The only pips that never cache are four NuGet downloads that
+cannot reach the network from this machine, and the 25 pips skipped behind them — an environmental
+limitation, not a sandbox one.
+
+**What this does not yet show.** These are single-machine, local-cache numbers. The cross-machine
+result is in §14. And the full minimal build still contains four `npm install` pips that cannot
+reach `registry.npmjs.org` from this machine, so its end-to-end no-op time is not quotable here;
+the 324-pip result above is the sandbox-relevant part of it.

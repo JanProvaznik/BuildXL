@@ -66,6 +66,22 @@ The 2019 attempt failed on a specific point, and it is worth being precise about
 
 **A separate macOS parity gap worth naming.** grpc publishes native arm64 tooling for Linux and not for macOS. `protoc` can be replaced with protobuf's own universal binary, which runs natively; `grpc_csharp_plugin` has no standalone build anywhere. Until that changes, macOS arm64 builds of anything using grpc need Rosetta 2. This is independent of the sandbox.
 
+**What the win is.** On the sandbox's own C++ build, running under Endpoint Security: a no-op rebuild
+is **3 seconds with 100% cache hits**, against 36 seconds when work has to be done. Reverting a
+change also returns to 3 seconds and 100% hits - the property no timestamp-based system can have,
+because undoing an edit makes files newer and forces `make`, `ninja` and Xcode to rebuild everything
+downstream. On a larger mixed C#/native closure of 133 pips, every one of the 104 pips that can
+succeed is served from cache; the rest are NuGet downloads blocked by the network on this machine.
+
+**One defect was destroying all of this.** macOS resolves an ancestor shell's script path during the
+exec transition of every descendant, and Endpoint Security charges it to the process being exec'd.
+Since every pip descends from `bxl.sh`, every pip reported an undeclared probe of it. On the minimal
+build that was 19 disallowed accesses, 15 failed pips and 182 skipped - and a failed pip's outputs
+are never cached, so the build could neither complete nor cache. With the launcher's path made known
+to the sandbox, the same build reports **0 disallowed accesses, 324 pips succeeded, 0 failed, 0
+skipped**. It is provably not a real access: it occurs for `/usr/bin/true` before dyld has run, and
+does not occur at all when the same broker is launched with no script ancestor.
+
 **What it costs.** 16.4% on real `clang++` compiles, with a fixed **13 ms per process**. That fixed part is what BuildXL pays once per pip, so it is the number that matters; it amortises across parallelism and is worst on builds of many very short pips. It was 22% and 37 ms before tuning - almost all of the startup cost turned out to be the sandbox's own fence protocol rather than anything Endpoint Security imposes (creating an ES client is 0.4 ms).
 
 **What has not been established.** All measurements come from one machine with SIP and AMFI relaxed, and the C++ targets exercised are small compared to a large production codebase - concurrency has been pushed hard, but a real dependency graph at scale has not.
