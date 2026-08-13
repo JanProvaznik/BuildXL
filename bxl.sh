@@ -10,7 +10,11 @@ MY_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Telling the sandbox which path is ours lets it drop those resolutions; a pip that genuinely opens
 # the file is still reported. Appended rather than assigned so a wrapping script can add its own.
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    __BUILDXL_MACOS_LAUNCHER_PATHS="${__BUILDXL_MACOS_LAUNCHER_PATHS:+$__BUILDXL_MACOS_LAUNCHER_PATHS:}$MY_DIR/$(basename "${BASH_SOURCE[0]}")"
+    # pwd -P, not pwd: Endpoint Security reports physically resolved paths, and /tmp and /var are
+    # themselves symlinks into /private on macOS, so the logical path would never match.
+    __bxl_launcher_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+    __BUILDXL_MACOS_LAUNCHER_PATHS="${__BUILDXL_MACOS_LAUNCHER_PATHS:+$__BUILDXL_MACOS_LAUNCHER_PATHS:}$__bxl_launcher_dir/$(basename "${BASH_SOURCE[0]}")"
+    unset __bxl_launcher_dir
     export __BUILDXL_MACOS_LAUNCHER_PATHS
 fi
 

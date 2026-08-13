@@ -169,7 +169,15 @@ std::vector<std::string> ReadLauncherPaths()
         const std::string entry = value.substr(start, end == std::string::npos ? std::string::npos : end - start);
         if (!entry.empty())
         {
-            paths.push_back(entry);
+            // Endpoint Security reports physically resolved paths, so a launcher named through a
+            // symlink would never match. That is not a corner case on macOS: /tmp and /var are
+            // themselves symlinks into /private, and bash's `pwd` returns the logical path, so a
+            // caller doing the obvious thing hands us a path the kernel will never report.
+            // Canonicalize here rather than trusting callers to. A path that cannot be resolved is
+            // kept as written - it is no worse than dropping it, and a launcher that does not exist
+            // yet simply never matches.
+            char resolved[PATH_MAX];
+            paths.push_back(realpath(entry.c_str(), resolved) != nullptr ? std::string(resolved) : entry);
         }
 
         if (end == std::string::npos)
