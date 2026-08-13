@@ -70,8 +70,10 @@ The 2019 attempt failed on a specific point, and it is worth being precise about
 is **3 seconds with 100% cache hits**, against 36 seconds when work has to be done. Reverting a
 change also returns to 3 seconds and 100% hits - the property no timestamp-based system can have,
 because undoing an edit makes files newer and forces `make`, `ninja` and Xcode to rebuild everything
-downstream. On a larger mixed C#/native closure of 133 pips, every one of the 104 pips that can
-succeed is served from cache; the rest are NuGet downloads blocked by the network on this machine.
+downstream. On the whole `BuildXL.Engine` module - a 450-pip closure of real C#
+compilation and native tooling - a no-op rebuild serves **all 377 cacheable pips from cache and
+revalidates the entire graph in 6 seconds**, against 2:08 for the run that had work to do. The only
+pips that never cache are NuGet downloads blocked by the network on this machine.
 
 **One defect was destroying all of this.** macOS resolves an ancestor shell's script path during the
 exec transition of every descendant, and Endpoint Security charges it to the process being exec'd.
