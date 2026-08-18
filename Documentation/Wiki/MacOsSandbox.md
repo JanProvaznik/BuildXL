@@ -2877,9 +2877,19 @@ a missing certificate rather than a quoting bug. The identity and keychain are s
 exactly this reason. Verified by passing a deliberately non-existent identity and confirming the
 whole string arrives: `Developer ID Application: Nonexistent Team (ZZZZZZZZZZ): no identity found`.
 
-**codesign is not reproducible, and it does not matter here.** Signing the same input twice produces
-files differing in exactly one byte inside the signature blob, and it increments on every invocation
-even with no delay - a counter, not a timestamp. This does not affect caching, because BuildXL
-fingerprints a pip's *inputs* and replays stored outputs on a hit: the signing pip is a cache hit on
-a no-op rebuild along with everything else. It would only surface if two machines both executed the
-pip and a third compared their outputs byte for byte.
+**codesign is not reproducible, and the cost of that is small but not zero.** Signing the same input
+twice produces files differing in exactly one byte inside the signature blob, and it increments on
+every invocation even with no delay - a counter, not a timestamp.
+
+It does not stop the signing pip from caching, because BuildXL fingerprints a pip's *inputs* and
+replays stored outputs on a hit: on a no-op rebuild the signing pip is a cache hit along with
+everything else. The cost appears one level out. The broker is `runtimeContent` of
+`BuildXL.Processes`, so almost everything depends on it, and whenever the signing pip genuinely
+re-executes the broker's content hash changes and that invalidates the pips downstream of it.
+
+Usually that is free, because the signing pip only re-executes when the broker actually changed and
+those pips would rebuild anyway. It is *not* free in one case worth knowing about: a machine with a
+cold or evicted cache re-executes the signing pip, produces a functionally identical broker with
+different bytes, and rebuilds everything downstream of it for no semantic reason. Observed directly -
+a build that had been getting 182 of 182 cache hits dropped to zero after a change that re-signed the
+broker. Anyone chasing a mysterious full rebuild on macOS should look here first.
