@@ -654,6 +654,19 @@ bool EsIngress::Normalize(const es_message_t *message, NormalizedEvent &out) con
 
 bool EsIngress::Start(EventHandler handler, std::string &errorMessage)
 {
+    // es_new_descendants_client is macOS 27. The broker is built with a lower deployment target so
+    // that this symbol is *weakly* imported: on an older system it resolves to null and we report a
+    // normal failure, which the caller turns into the interposition backend. Built against a 27
+    // deployment target instead, the symbol is bound strictly and dyld refuses to load the broker at
+    // all - which would make the documented fallback unreachable on exactly the machines that need
+    // it, and present as a launch failure rather than a backend choice.
+    if (es_new_descendants_client == nullptr)
+    {
+        errorMessage = "es_new_descendants_client is unavailable; Endpoint Security's "
+                       "descendant-scoped client needs macOS 27 or newer";
+        return false;
+    }
+
     m_handler = std::move(handler);
 
     __block EsIngress *self = this;
@@ -696,7 +709,13 @@ bool EsIngress::Start(EventHandler handler, std::string &errorMessage)
     // A missed deadline defaults to killing the client, which would destroy the whole stream. Fail
     // open instead: the access proceeds, the kernel records a gap in global_seq_num, the engine sees
     // the gap and taints the pip. The build stays correct and the pip is simply re-run uncached.
-    es_set_deadline_miss_mode(m_client, ES_DEADLINE_MISS_MODE_FAIL_OPEN);
+    // Also macOS 27, and weakly imported for the same reason. Unlike the client itself this one is
+    // not load-bearing - without it the kernel keeps its default deadline behaviour - so a null here
+    // costs a guarantee, not the run.
+    if (es_set_deadline_miss_mode != nullptr)
+    {
+        es_set_deadline_miss_mode(m_client, ES_DEADLINE_MISS_MODE_FAIL_OPEN);
+    }
 
     const std::vector<es_event_type_t> events = SubscriptionSet();
     if (es_subscribe(m_client, events.data(), static_cast<uint32_t>(events.size())) != ES_RETURN_SUCCESS)

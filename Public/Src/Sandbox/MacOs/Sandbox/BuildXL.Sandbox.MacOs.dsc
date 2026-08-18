@@ -110,7 +110,13 @@ namespace EndpointSecuritySandbox {
      * introduced. Older releases have no API that can observe a process tree soundly, so there is
      * nothing to fall back to and the minimum is a hard one.
      */
-    const minimumOsVersion = "27.0";
+    // Deliberately lower than the 27.0 that es_new_descendants_client requires. Building at 27.0
+    // binds that symbol strictly, so dyld refuses to load the broker on anything older and the
+    // interposition backend - the documented fallback for machines without Endpoint Security - can
+    // never be reached. At 26.0 the macOS 27 entry points are weakly imported, resolve to null on an
+    // older system, and EsIngress::Start reports a normal failure that selects interposition. The
+    // SDK is still the 27 one, so nothing about the Endpoint Security path changes on macOS 27.
+    const minimumOsVersion = "26.0";
 
     /**
      * Built for the architecture named by the target runtime rather than the host's. Without an
