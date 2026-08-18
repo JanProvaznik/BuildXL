@@ -2799,6 +2799,17 @@ interposition path, and the 64 s execution time against 2 s for the cached Endpo
 confirms everything re-executed. So macOS CI on BuildXL is available today on hosted runners; what
 waiting for macOS 27 and the entitlement buys is the *guarantees*, not the ability to build at all.
 
+**That row was not true when it was first written, which is worth recording.** The fallback existed
+in the selection logic but could never run: `es_new_descendants_client` and `es_set_deadline_miss_mode`
+are macOS 27 symbols, and the broker was compiled with a 27.0 deployment target, which binds them
+strictly - so on macOS 26 dyld refuses to load the broker at all, and the fallback was unreachable on
+exactly the machines it exists for. `nm` shows the difference plainly: at `-mmacosx-version-min=27.0`
+the symbol is `external`, at `26.0` it is `weak external`, which resolves to null on an older system
+rather than preventing the load. The deployment target is now 26.0 and both call sites are guarded -
+the client is load-bearing so a null there selects interposition, the deadline setter is not so a null
+there costs a guarantee rather than the run. Nothing changes on macOS 27, which still builds against
+the 27 SDK and still starts a descendants client.
+
 **`Diagnostics/ci-preflight.sh` answers this for a given machine** rather than by argument. It checks
 the OS, the broker's signature and entitlement, the SIP/AMFI pair, the CoreCLR patch state and
 Rosetta, and then asks the kernel directly by starting a real descendants client. Everything except
