@@ -2815,3 +2815,71 @@ the OS, the broker's signature and entitlement, the SIP/AMFI pair, the CoreCLR p
 Rosetta, and then asks the kernel directly by starting a real descendants client. Everything except
 that last check is diagnosis; the live probe is what decides. It exits non-zero with the specific
 remediation for whatever is missing, so it can gate a pipeline.
+
+### 17.16 Signing, and how CI self-builds BuildXL once the entitlement exists
+
+Getting the entitlement from Apple is the start, not the end. The entitlement is granted to a *team*,
+and it is only honoured when it arrives in a signature made by that team's certificate. So the
+question "how do we run CI" is really "which machine holds the certificate, and which broker
+sandboxes the build".
+
+**The one fact that makes this tractable: the broker that sandboxes a build is not the broker that
+build produces.** BuildXL resolves the broker from its own deployment
+(`SandboxedProcessUnix.EnsureDeploymentFile("bxl-es-broker")`), and the broker a build compiles is
+just an output artifact. Those are independent, which is what breaks the apparent chicken-and-egg.
+
+**The bootstrap already works, because the broker rides the normal deployment.** It is listed in
+`BuildXL.Processes.dsc` `runtimeContent` exactly like the Linux sandbox natives, so it flows into the
+published package, and that package is what `bxl.sh` downloads as the LKG to build BuildXL with. So:
+
+```
+release pipeline: build broker -> sign with the team certificate -> publish package
+                                                                          |
+CI machine:  bxl.sh downloads LKG (contains a signed broker) --------------+
+             -> sandboxed self-build, with no certificate anywhere on the machine
+```
+
+That is the important consequence: **ordinary CI machines never need the certificate.** Only the
+release pipeline does. Machines that consume the LKG inherit a working, entitled broker.
+
+**Two pipelines, because they answer different questions.**
+
+| | What sandboxes the build | Certificate needed | What it proves |
+|---|---|---|---|
+| PR validation | the LKG's signed broker | no | the change does not break builds under the sandbox |
+| Release / rolling | the LKG's broker, then re-run on the newly signed one | yes, in the pipeline | the *new* broker is itself good |
+
+The second row is the one people forget. Testing a newly built broker is inherently two-hop: build
+it, sign it, put it in a deployment, and run again. A single build cannot validate the broker it is
+currently producing, because it is already being sandboxed by a different one. This is not specific
+to macOS - it is the same shape as validating a new `bxl.exe` with the old one - but the signing step
+makes the hop explicit.
+
+**Signing the broker in-build.** `BUILDXL_MACOS_SIGNING_IDENTITY` selects the identity; unset means
+ad-hoc, which is what a development machine wants. `BUILDXL_MACOS_SIGNING_KEYCHAIN` points at a
+dedicated keychain for pipelines that import the certificate into one rather than into the login
+keychain, and its directory is untracked so codesign can lock and read it.
+
+The identity is part of the pip's command line and therefore part of its fingerprint, so switching
+from ad-hoc to a real identity re-signs rather than replaying a cached ad-hoc signature. That
+matters more than it sounds: the two outputs are identical by name and differ only in whether the
+kernel will accept them.
+
+If the organisation signs through ESRP instead - the repository already has ESRP wiring for NuGet,
+though it is Windows-only and does not cover Mach-O binaries - then the in-build signature is simply
+the ad-hoc default and the release pipeline re-signs the deployed broker afterwards. Both topologies
+work; the difference is only whether a certificate is ever present on a build machine.
+
+**A trap worth stating, because it fails in a misleading way.** Every real identity contains spaces
+(`Developer ID Application: Contoso (AB12CD34EF)`), and the signing step runs inside `sh -c "..."`.
+Unquoted, the shell splits it and codesign reports `Developer: no identity found` - which reads like
+a missing certificate rather than a quoting bug. The identity and keychain are single-quoted for
+exactly this reason. Verified by passing a deliberately non-existent identity and confirming the
+whole string arrives: `Developer ID Application: Nonexistent Team (ZZZZZZZZZZ): no identity found`.
+
+**codesign is not reproducible, and it does not matter here.** Signing the same input twice produces
+files differing in exactly one byte inside the signature blob, and it increments on every invocation
+even with no delay - a counter, not a timestamp. This does not affect caching, because BuildXL
+fingerprints a pip's *inputs* and replays stored outputs on a hit: the signing pip is a cache hit on
+a no-op rebuild along with everything else. It would only surface if two machines both executed the
+pip and a third compared their outputs byte for byte.

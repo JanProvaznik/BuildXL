@@ -227,6 +227,30 @@ namespace EndpointSecuritySandbox {
      * entitlement *present*, which is what a machine with SIP disabled and amfi_get_out_of_my_way=1
      * honours, and what a shipping build re-signs over with the team's real identity.
      */
+    /**
+     * The identity to sign the broker with.
+     *
+     * Ad-hoc ("-") by default, which is what a development machine wants: it makes the entitlement
+     * present so an AMFI-relaxed machine honours it, and it needs no credentials. A pipeline that
+     * holds the team's certificate sets BUILDXL_MACOS_SIGNING_IDENTITY to the identity name, and the
+     * broker it produces is one that works on a normal machine with SIP and AMFI both on.
+     *
+     * The identity lands on the command line, so it is part of the pip's fingerprint: changing it
+     * re-signs rather than silently reusing a cached ad-hoc signature. That matters, because the two
+     * are indistinguishable by file name and differ only in whether the kernel accepts the result.
+     */
+    const signingIdentity = Environment.hasVariable("BUILDXL_MACOS_SIGNING_IDENTITY")
+        ? Environment.getStringValue("BUILDXL_MACOS_SIGNING_IDENTITY")
+        : "-";
+
+    /**
+     * A keychain to sign from, for pipelines that import the certificate into a dedicated keychain
+     * rather than the login one. Unset means codesign uses the default search list.
+     */
+    const signingKeychain = Environment.hasVariable("BUILDXL_MACOS_SIGNING_KEYCHAIN")
+        ? Environment.getStringValue("BUILDXL_MACOS_SIGNING_KEYCHAIN")
+        : undefined;
+
     function signBroker(unsigned: DerivedFile) : DerivedFile {
         const outDir = Context.getNewOutputDirectory("bxl-es-broker-signed");
         const outFile = p`${outDir}/bxl-es-broker`;
@@ -250,7 +274,14 @@ namespace EndpointSecuritySandbox {
                 Cmd.argument("/usr/bin/codesign"),
                 Cmd.argument("--force"),
                 Cmd.argument("--sign"),
-                Cmd.argument("-"),
+                // Single-quoted because this whole command runs inside sh -c "...", and every real
+                // signing identity contains spaces - "Developer ID Application: Contoso (AB12CD34EF)".
+                // Unquoted, the shell splits it and codesign sees only "Developer", failing with
+                // "no identity found" while looking like the certificate is missing.
+                Cmd.rawArgument(` '${signingIdentity}'`),
+                // Emits nothing when the keychain is unset, which is the common case. Quoted for the
+                // same reason: a keychain path may contain spaces.
+                ...(signingKeychain !== undefined ? [Cmd.rawArgument(` --keychain '${signingKeychain}'`)] : []),
                 Cmd.argument("--entitlements"),
                 Cmd.argument(Artifact.input(entitlements)),
                 Cmd.argument(Artifact.none(outFile)),
@@ -263,6 +294,11 @@ namespace EndpointSecuritySandbox {
                     d`/private/var/db`,
                     d`/private/var/folders`,
                     ...(Environment.hasVariable("HOME") ? [d`${Environment.getDirectoryValue("HOME")}/Library`] : []),
+                    // A pipeline that keeps the certificate in a dedicated keychain puts it outside
+                    // the paths above, and codesign reads and locks it while signing.
+                    ...(Environment.hasVariable("BUILDXL_MACOS_SIGNING_KEYCHAIN")
+                        ? [Directory.fromPath(Environment.getPathValue("BUILDXL_MACOS_SIGNING_KEYCHAIN").parent)]
+                        : []),
                 ],
                 untrackedPaths: [outDir],
             },
