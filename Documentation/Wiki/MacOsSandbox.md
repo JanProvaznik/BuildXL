@@ -2761,3 +2761,46 @@ limitation, not a sandbox one.
 result is in §14. And the full minimal build still contains four `npm install` pips that cannot
 reach `registry.npmjs.org` from this machine, so its end-to-end no-op time is not quotable here;
 the 324-pip result above is the sandbox-relevant part of it.
+
+### 17.15 Where this can actually run today
+
+"Can we get a macOS 27 machine" turns out to have two independent answers, and the second one is the
+one that matters.
+
+**Hosted CI does not offer macOS 27, and will not for some time.** Measured against the live
+`actions/runner-images` metadata rather than assumed: the newest hosted image is **macOS 26.5.2
+(25F84)**, on both x64 and arm64. There is no macOS 27 label. This machine reports macOS 27.0 build
+`26A5388g` — the `5xxx`-plus-letter pattern is a seed build, so 27 is still beta, with GA expected
+around September. Hosted images have historically followed GA by a further couple of months.
+
+**But hosted CI is blocked for a second, independent reason, and that one does not expire.** Without
+the Apple entitlement the broker needs SIP disabled *and* `amfi_get_out_of_my_way=0x1`, which needs a
+reboot and an nvram write. Hosted runners are ephemeral VMs with SIP on and no nvram access. So even
+the day a `macos-27` image appears, it would not run this sandbox.
+
+Those two facts point the same way: **the entitlement is not merely a way to stop disabling SIP — it
+is the thing that makes hosted CI possible at all.** With a properly entitled broker, SIP stays on,
+AMFI stays on, .NET is untouched, and the sandbox becomes something a managed fleet can run. That is
+the strongest practical argument for pursuing it.
+
+What can be done in the meantime, in increasing order of fidelity:
+
+| Option | macOS 27? | ES backend? | Notes |
+|---|---|---|---|
+| Hosted `macos-26` | no | no | Falls back to interposition. Xcode 27 ships on this image as a public preview, so the ES code still *compiles*. |
+| Self-hosted runner on a controlled Mac | yes | yes | Works today. This is how the results in this document were produced. |
+| Bare-metal Mac cloud (dedicated host) | yes | yes | You own the OS and boot-args, so the beta and the AMFI relaxation are both possible. |
+
+**The hosted-macOS-26 row is worth more than it looks, and it was verified rather than assumed.** A
+real BuildXL build was run with the backend forced to interposition: **exit 0, 8 of 8 pips, 0
+disallowed accesses**. Backend selection cannot silently fall back the other way — `CreateEventSource`
+only constructs an `EsIngress` when the mode is not `interpose` — so this genuinely exercised the
+interposition path, and the 64 s execution time against 2 s for the cached Endpoint Security build
+confirms everything re-executed. So macOS CI on BuildXL is available today on hosted runners; what
+waiting for macOS 27 and the entitlement buys is the *guarantees*, not the ability to build at all.
+
+**`Diagnostics/ci-preflight.sh` answers this for a given machine** rather than by argument. It checks
+the OS, the broker's signature and entitlement, the SIP/AMFI pair, the CoreCLR patch state and
+Rosetta, and then asks the kernel directly by starting a real descendants client. Everything except
+that last check is diagnosis; the live probe is what decides. It exits non-zero with the specific
+remediation for whatever is missing, so it can gate a pipeline.
