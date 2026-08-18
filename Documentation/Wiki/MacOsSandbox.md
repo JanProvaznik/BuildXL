@@ -3038,9 +3038,40 @@ So what is missing is not in the archive - it is the state of the receiving mach
 | SIP disabled | so the AMFI boot-arg can be set | **yes** |
 | `amfi_get_out_of_my_way=0x1` + reboot | AMFI will not honour a restricted entitlement on an ad-hoc signature | **yes** |
 | CoreCLR patched | consequence of relaxing AMFI, and must be redone after every .NET update | **yes** |
-| Rosetta 2 | grpc ships no `macosx_arm64` `protoc` or `grpc_csharp_plugin` | no |
+| Rosetta 2 - **only if they build BuildXL from source** | see below | no |
 | .NET SDK, and `DOTNET_ROOT` set | bxl is a .NET application | no |
 | **quarantine removed from the archive** | see below | mostly |
+
+**Rosetta is not needed to *run* a handed-over build, which is a correction to an earlier claim
+here.** The deployment is pure arm64 - all 61 Mach-O files in it - and the gRPC that ships inside it
+is managed IL with no native component, so nothing in the archive needs translation. Rosetta is
+needed only to *compile BuildXL from source*, because the protobuf code generators are x86_64:
+
+- `protoc` and `grpc_csharp_plugin` are **build-time** code generators. They turn `.proto` files
+  into `.cs` at compile time and live in the NuGet package cache, not in the deployment.
+- `Google.Protobuf.Tools` ships `macosx_x64` only; `Grpc.Tools` likewise. Confirmed upstream rather
+  than inferred: a code search of `grpc/grpc` finds `macosx_x64` and **zero** occurrences of
+  `macosx_arm64`, and the PR that proposed native macOS ARM64 support via universal binaries
+  (grpc/grpc#41222) was closed without being merged.
+- The SDK already prefers `tools/macosx_arm64` and falls back to `macosx_x64`, so the day grpc ships
+  arm64 tooling this requirement disappears with a version bump and no code change.
+
+**What BuildXL uses gRPC for at all**, since it is reasonable to ask why a local build drags this in.
+Seven `.proto` files, and the distinction between them matters:
+
+| Proto | Purpose | Needs the gRPC plugin? |
+|---|---|---|
+| `Engine/Distribution.Grpc` | orchestrator/worker for distributed builds | yes |
+| `Cache/ContentStore/Grpc` | remote cache service | yes |
+| `Utilities/Ipc.Grpc` | IPC with service daemons | yes |
+| `Utilities/Plugin.Grpc` | plugin protocol | yes |
+| `Processes.External/Remoting` | remote process execution | yes |
+| **`Engine/Cache/Fingerprints`** | **fingerprint serialization, used by the local cache** | **no - `proto:`, not `rpc:`** |
+
+Only protos declared `rpc:` invoke `grpc_csharp_plugin`; the rest use `protoc --csharp_out` alone.
+So the one piece of this a single-machine local build actually depends on is plain protobuf message
+serialization, not gRPC at all. Everything genuinely gRPC is for distribution, remote caching and
+IPC - none of which a local build uses at runtime.
 
 **The quarantine one is specific to sending, and it is the one that will waste an afternoon.** macOS
 tags anything arriving by download, AirDrop or email with `com.apple.quarantine`, and Gatekeeper then
@@ -3074,6 +3105,20 @@ Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/ci-preflight.sh Dev/bxl-es-broker
 ```
 
 They also need the repository they intend to build; the archive is the engine, not the sources.
+
+**One thing this exercise caught in the deployment itself.** Scanning every Mach-O in
+`Out/Selfhost/Dev` by architecture turned up a single x86_64 file - the broker. It had been deployed
+by hand from a `find | head -1` that picked arbitrarily between the `osx-x64` and `osx-arm64`
+qualifier outputs, both of which exist after a build. It worked, and quietly: this machine has
+Rosetta, so an x86_64 broker translated and still created a working Endpoint Security client. That
+is a genuinely useful data point - the sandbox does function under translation - but it means the
+deployment would have failed on a recipient without Rosetta, for a reason that has nothing to do with
+grpc. Worth doing on any deployment before shipping it:
+
+```bash
+find Out/Selfhost/Dev -type f \( -perm +111 -o -name "*.dylib" \) |
+  while read f; do file -b "$f" | grep -q x86_64 && echo "$f"; done
+```
 
 **The shape of this changes completely once the entitlement lands.** Four of the seven rows above
 exist only because the broker is ad-hoc signed, and they are the four that require reconfiguring the
