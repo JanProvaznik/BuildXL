@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Info.plist for the bundled form of the Endpoint Security broker.
+
+    A bare Mach-O cannot carry a provisioning profile, and a provisioning profile is how Apple
+    authorizes a restricted entitlement for third-party code. AMFI looks for the profile at
+    Contents/embedded.provisionprofile relative to the main bundle, so a broker that has to be
+    honoured on a machine with SIP and AMFI enabled has to be a bundle. The only shipping
+    third-party Endpoint Security client available to compare against is built exactly this way.
+
+    CFBundleIdentifier must match the application identifier the profile was issued for, or AMFI
+    rejects the entitlement even though the profile is present and valid. The build substitutes it
+    from BUILDXL_MACOS_BUNDLE_ID.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>__BUNDLE_ID__</string>
+    <key>CFBundleExecutable</key>
+    <string>bxl-es-broker</string>
+    <key>CFBundleName</key>
+    <string>bxl-es-broker</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+</dict>
+</plist>

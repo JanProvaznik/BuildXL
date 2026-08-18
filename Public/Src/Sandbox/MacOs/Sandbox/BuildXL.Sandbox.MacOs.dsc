@@ -130,6 +130,37 @@ namespace EndpointSecuritySandbox {
     export const broker : DerivedFile = isMacOsHost ? build() : undefined;
 
     /**
+     * A provisioning profile authorizing the Endpoint Security entitlement, if the pipeline has one.
+     *
+     * Apple authorizes a *restricted* entitlement for third-party code through a provisioning
+     * profile, and AMFI looks for that profile inside the bundle - a bare Mach-O has nowhere to put
+     * one. So a broker that must be honoured on a machine with SIP and AMFI enabled has to be
+     * bundled. When this is unset, the build produces the bare executable it always has, which is
+     * what a development machine wants and what an AMFI-relaxed machine accepts.
+     */
+    const provisioningProfile = Environment.hasVariable("BUILDXL_MACOS_PROVISIONING_PROFILE")
+        ? Environment.getStringValue("BUILDXL_MACOS_PROVISIONING_PROFILE")
+        : undefined;
+
+    /**
+     * The bundle identifier, which must match the application identifier the profile was issued for.
+     * A mismatch is rejected by AMFI even though the profile is present and valid.
+     */
+    const bundleIdentifier = Environment.hasVariable("BUILDXL_MACOS_BUNDLE_ID")
+        ? Environment.getStringValue("BUILDXL_MACOS_BUNDLE_ID")
+        : "com.microsoft.buildxl.essandbox";
+
+    /**
+     * The broker packaged as a bundle around the signed executable, produced only when a
+     * provisioning profile is supplied. This is the form that works on a machine that has not been
+     * told to stop checking signatures.
+     */
+    @@public
+    export const brokerBundle : StaticDirectory = isMacOsHost && provisioningProfile !== undefined
+        ? packageBrokerBundle()
+        : undefined;
+
+    /**
      * The library dyld injects into every process the broker supervises.
      *
      * Built as C rather than C++ on purpose: it runs inside processes that BuildXL does not own, so it
@@ -250,6 +281,85 @@ namespace EndpointSecuritySandbox {
     const signingKeychain = Environment.hasVariable("BUILDXL_MACOS_SIGNING_KEYCHAIN")
         ? Environment.getStringValue("BUILDXL_MACOS_SIGNING_KEYCHAIN")
         : undefined;
+
+    /**
+     * Wraps the signed broker in a bundle carrying the provisioning profile, then signs the bundle.
+     *
+     * The layout mirrors the only shipping third-party Endpoint Security client available to compare
+     * against: the executable at Contents/MacOS, the profile at Contents/embedded.provisionprofile,
+     * and the entitlement in the signature of the code itself. The bundle is signed as a unit after
+     * the profile is in place, because codesign seals the bundle's contents - signing first and
+     * copying the profile in afterwards produces a bundle that fails its own signature check.
+     */
+    function packageBrokerBundle() : StaticDirectory {
+        const outDir = Context.getNewOutputDirectory("bxl-es-broker-bundle");
+        const bundle = d`${outDir}/bxl-es-broker.app`;
+        const entitlements = f`bxl-es-broker.entitlements`;
+        const infoPlistTemplate = f`bxl-es-broker.Info.plist`;
+
+        const result = Transformer.execute({
+            tool: {
+                exe: f`/bin/sh`,
+                dependsOnCurrentHostOSDirectories: true,
+                untrackedDirectoryScopes: MacOsClang.toolchainScopes,
+            },
+            workingDirectory: outDir,
+            arguments: [
+                Cmd.argument("-c"),
+                Cmd.rawArgument('"'),
+                // Paths inside the bundle are relative to the pip's working directory, which is the
+                // output directory. Interpolating a Path into a template string does not produce a
+                // plain path - it produces DScript's own path literal syntax, backtick and all - so
+                // the bundle would be built inside a directory whose name is the literal text of the
+                // expression. Only plain strings from the environment are interpolated below.
+                Cmd.rawArgument("mkdir -p bxl-es-broker.app/Contents/MacOS"),
+                Cmd.rawArgument(" && cp "),
+                Cmd.argument(Artifact.input(broker)),
+                Cmd.rawArgument(" bxl-es-broker.app/Contents/MacOS/bxl-es-broker"),
+                // The identifier has to match the profile's application identifier, so it is
+                // substituted rather than baked into the committed template.
+                Cmd.rawArgument(" && sed "),
+                Cmd.rawArgument(`'s|__BUNDLE_ID__|${bundleIdentifier}|'`),
+                Cmd.argument(Artifact.input(infoPlistTemplate)),
+                Cmd.rawArgument(" > bxl-es-broker.app/Contents/Info.plist"),
+                Cmd.rawArgument(` && cp '${provisioningProfile}' bxl-es-broker.app/Contents/embedded.provisionprofile`),
+                // The bundle is signed as a unit, after the profile is in place: codesign seals the
+                // bundle's contents, so copying anything in afterwards invalidates the signature.
+                Cmd.rawArgument(" && /usr/bin/codesign --force --sign "),
+                Cmd.rawArgument(`'${signingIdentity}'`),
+                ...(signingKeychain !== undefined ? [Cmd.rawArgument(` --keychain '${signingKeychain}'`)] : []),
+                Cmd.rawArgument(" --entitlements "),
+                Cmd.argument(Artifact.input(entitlements)),
+                Cmd.rawArgument(" bxl-es-broker.app"),
+                Cmd.rawArgument('"'),
+            ],
+            outputs: [
+                { kind: "exclusive", directory: bundle },
+            ],
+            unsafe: {
+                untrackedScopes: [
+                    d`/private/var/db`,
+                    d`/private/var/folders`,
+                    ...(Environment.hasVariable("HOME") ? [d`${Environment.getDirectoryValue("HOME")}/Library`] : []),
+                    ...(Environment.hasVariable("BUILDXL_MACOS_SIGNING_KEYCHAIN")
+                        ? [Directory.fromPath(Environment.getPathValue("BUILDXL_MACOS_SIGNING_KEYCHAIN").parent)]
+                        : []),
+                    // The profile is supplied by the pipeline and normally lives outside the repo.
+                    // Its path is on the command line, so replacing the file at the same path does
+                    // not by itself invalidate this pip - a pipeline that rotates a profile should
+                    // treat it like any other credential change and not expect an incremental build
+                    // to notice.
+                    ...(provisioningProfile !== undefined
+                        ? [Directory.fromPath(p`${provisioningProfile}`.parent)]
+                        : []),
+                ],
+                untrackedPaths: [outDir],
+            },
+            tags: ["codesign", "macos", "sandbox"],
+        });
+
+        return result.getOutputDirectory(bundle);
+    }
 
     function signBroker(unsigned: DerivedFile) : DerivedFile {
         const outDir = Context.getNewOutputDirectory("bxl-es-broker-signed");

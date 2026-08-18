@@ -107,7 +107,25 @@ namespace BuildXL.Processes
         /// <summary>
         /// The broker that wraps every sandboxed root process.
         /// </summary>
-        public static readonly string Broker = SandboxedProcessUnix.EnsureDeploymentFile("bxl-es-broker", setExecuteBit: true);
+        /// <remarks>
+        /// Prefers the bundled form when the deployment carries one. Apple authorizes a restricted
+        /// entitlement through a provisioning profile, and a profile has to live inside a bundle, so a
+        /// broker that is honoured on a machine with SIP and AMFI enabled is necessarily bundled. A
+        /// development build has no profile and ships the bare executable, which is what an
+        /// AMFI-relaxed machine accepts. Preferring the bundle rather than choosing by configuration
+        /// means the same BuildXL works with either deployment.
+        /// </remarks>
+        public static readonly string Broker = ResolveBroker();
+
+        private static string ResolveBroker()
+        {
+            const string BundledBroker = "bxl-es-broker.app/Contents/MacOS/bxl-es-broker";
+
+            string bundled = SandboxedProcessUnix.GetDeploymentFileFullPath(BundledBroker);
+            return File.Exists(bundled)
+                ? SandboxedProcessUnix.EnsureDeploymentFile(BundledBroker, setExecuteBit: true)
+                : SandboxedProcessUnix.EnsureDeploymentFile("bxl-es-broker", setExecuteBit: true);
+        }
 
         private readonly ConcurrentDictionary<long, Info> m_pipProcesses = new();
         private readonly ManagedFailureCallback m_failureCallback;

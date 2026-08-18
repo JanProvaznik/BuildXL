@@ -2893,3 +2893,125 @@ cold or evicted cache re-executes the signing pip, produces a functionally ident
 different bytes, and rebuilds everything downstream of it for no semantic reason. Observed directly -
 a build that had been getting 182 of 182 cache hits dropped to zero after a change that re-signed the
 broker. Anyone chasing a mysterious full rebuild on macOS should look here first.
+
+### 17.17 Getting the entitlement, and applying it locally and in a pipeline
+
+#### What the grant actually is
+
+`com.apple.developer.endpoint-security.client` is a *restricted* entitlement. Two things have to be
+true before the kernel honours it:
+
+1. Apple has granted the entitlement to a **team**, and
+2. the code presents a **provisioning profile** that authorizes it, issued for the **application
+   identifier** that code is signed as.
+
+The second point is the one that shapes the build, and it is why this section exists at all.
+
+#### Microsoft already holds this grant
+
+This is not a guess. A shipping third-party Endpoint Security client is installed on the development
+machine - Microsoft Defender - and its profile decodes to:
+
+```
+Name:             Microsoft Defender ATP EPS wdav Distribution
+TeamName:         Microsoft Corporation
+TeamIdentifier:   UBF8T346G9
+ProvisionsAllDevices: true          (a Developer ID profile, not device-limited)
+ExpirationDate:   2043-04-13
+Entitlements:
+  com.apple.developer.endpoint-security.client = True
+  com.apple.developer.system-extension.install = True
+  com.apple.application-identifier             = UBF8T346G9.com.microsoft.wdav.epsext
+```
+
+So the team-level grant exists and has for years. **The request to Apple has most likely already been
+won; what is missing is a profile for a BuildXL application identifier.** Note the profile is bound to
+`...wdav.epsext` - Defender's own App ID - so it cannot be reused. What is needed is a new App ID such
+as `UBF8T346G9.com.microsoft.buildxl.essandbox` with the Endpoint Security capability enabled, and a
+Developer ID provisioning profile issued for it. That is a request to whoever administers the Apple
+Developer team, not a fresh negotiation with Apple.
+
+For a team that does *not* already hold the grant, the request form is
+`https://developer.apple.com/contact/request/system-extension/` (verified live; it requires an Apple
+ID sign-in). Apple asks what the software does and why it needs system-level monitoring.
+
+#### Why the broker has to be a bundle
+
+A provisioning profile lives at `Contents/embedded.provisionprofile` inside a bundle. A bare Mach-O
+has nowhere to put one, so it cannot present a profile, so a restricted entitlement on a bare Mach-O
+is not authorized on a machine that is still checking.
+
+The evidence on this machine points one way. Defender's Endpoint Security client is a bundle with an
+embedded profile. `/usr/bin/eslogger` *is* a bare Mach-O carrying the same entitlement - but it is an
+Apple platform binary that also carries `com.apple.private.endpoint-security.embeddedclient`, so it is
+authorized by Apple's own signing chain rather than by a profile. Sweeping the machine's other
+executables turned up no third-party Endpoint Security client that is not a bundle.
+
+The build therefore produces a bundle when it is given a profile, and the bare executable otherwise.
+BuildXL prefers the bundle when the deployment carries one, so a deployment built by a pipeline with
+the certificate is a drop-in replacement for one built on a development machine.
+
+#### Applying it locally
+
+```bash
+# One-time: the profile issued for the BuildXL App ID.
+export BUILDXL_MACOS_PROVISIONING_PROFILE=/path/to/BuildXL_ES.provisionprofile
+export BUILDXL_MACOS_BUNDLE_ID=com.microsoft.buildxl.essandbox   # must match the profile's App ID
+export BUILDXL_MACOS_SIGNING_IDENTITY="Developer ID Application: Microsoft Corporation (UBF8T346G9)"
+
+./bxl.sh --minimal
+```
+
+That produces `bxl-es-broker.app` with the profile embedded and the bundle signed as a unit. Then
+re-enable the protections that were only ever disabled to work around the missing grant:
+
+```bash
+sudo nvram -d boot-args                       # remove amfi_get_out_of_my_way, then reboot
+csrutil enable                                # from recoveryOS
+python3 Diagnostics/relax-dataconst.py --check "$HOME/.dotnet"   # no longer needs to pass
+Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/ci-preflight.sh     # should report Ready
+```
+
+The preflight recognises a properly signed broker and stops demanding SIP and AMFI changes, which is
+the visible signal that the grant is doing its job.
+
+#### Applying it in a pipeline
+
+The certificate belongs on exactly one class of machine - the release pipeline - and nowhere else:
+
+```yaml
+# Release pipeline (holds the certificate)
+- import the Developer ID certificate into a dedicated keychain
+- export BUILDXL_MACOS_SIGNING_KEYCHAIN=/path/to/build.keychain
+- export BUILDXL_MACOS_SIGNING_IDENTITY="Developer ID Application: ... (UBF8T346G9)"
+- export BUILDXL_MACOS_PROVISIONING_PROFILE=$(Agent.TempDirectory)/BuildXL_ES.provisionprofile
+- export BUILDXL_MACOS_BUNDLE_ID=com.microsoft.buildxl.essandbox
+- ./bxl.sh --minimal            # emits a signed, profiled bxl-es-broker.app
+- notarize and staple the bundle
+- publish the package
+
+# PR / validation pipelines (no certificate, no secrets)
+- ./bxl.sh                      # sandboxed by the signed broker that arrived in the LKG
+```
+
+Three details that are easy to get wrong:
+
+- **The bundle identifier must match the profile's application identifier.** AMFI rejects the
+  entitlement on a mismatch even though the profile is present and valid, and the message does not
+  say which of the two is wrong.
+- **Sign the bundle after the profile is in place.** codesign seals the bundle's contents, so copying
+  a profile in afterwards produces a bundle that fails its own signature check. The build does these
+  in the right order.
+- **Notarize the bundle.** Developer ID software that has not been notarized is subject to Gatekeeper
+  refusal on machines that did not build it, which is every machine that consumes the package.
+
+#### What is verified here and what is not
+
+Verified on this machine: the bundle builds through BuildXL, has exactly the layout of the shipping
+Defender client (`Contents/MacOS/`, `Contents/embedded.provisionprofile`, `Contents/Info.plist`,
+`Contents/_CodeSignature/`), passes `codesign --verify --deep --strict` as "valid on disk" and
+"satisfies its Designated Requirement", and the broker inside it still starts an Endpoint Security
+descendants client. The default path with no profile is unchanged.
+
+Not verified, because it needs the grant: that a *real* certificate plus profile authorizes the
+entitlement with SIP and AMFI enabled. Everything up to that point is mechanical and now in place.

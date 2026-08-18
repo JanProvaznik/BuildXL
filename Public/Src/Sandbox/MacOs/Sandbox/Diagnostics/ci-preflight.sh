@@ -48,7 +48,23 @@ bad()  { printf '  \033[31mno\033[0m    %s\n' "$*"; }
 FAILURES=0
 fail() { bad "$*"; FAILURES=$((FAILURES + 1)); }
 
-BROKER="${1:-$REPO_ROOT/Out/Selfhost/Dev/bxl-es-broker}"
+# Prefer the bundled broker, matching what BuildXL itself does: a profile can only live inside a
+# bundle, so that is the form a properly entitled deployment takes.
+BROKER="${1:-}"
+if [[ -z "$BROKER" ]]; then
+    if [[ -x "$REPO_ROOT/Out/Selfhost/Dev/bxl-es-broker.app/Contents/MacOS/bxl-es-broker" ]]; then
+        BROKER="$REPO_ROOT/Out/Selfhost/Dev/bxl-es-broker.app/Contents/MacOS/bxl-es-broker"
+    else
+        BROKER="$REPO_ROOT/Out/Selfhost/Dev/bxl-es-broker"
+    fi
+fi
+
+# codesign reports a bundle's signature from the bundle, not from the executable inside it, so
+# signature questions are asked of whichever of the two actually carries the seal.
+SIGN_TARGET="$BROKER"
+case "$BROKER" in
+    */bxl-es-broker.app/Contents/MacOS/bxl-es-broker) SIGN_TARGET="${BROKER%/Contents/MacOS/bxl-es-broker}" ;;
+esac
 
 # ------------------------------------------------------------------ operating system
 
@@ -67,20 +83,21 @@ echo
 bold "Broker"
 if [[ -x "$BROKER" ]]; then
     ok "found $BROKER"
+    [[ "$SIGN_TARGET" != "$BROKER" ]] && ok "bundled, so it can carry a provisioning profile"
 else
     fail "no broker at $BROKER (build it, or pass its path as an argument)"
 fi
 
 ENTITLED_BINARY=0
 if [[ -x "$BROKER" ]]; then
-    if codesign -dv "$BROKER" >/dev/null 2>&1; then
+    if codesign -dv "$SIGN_TARGET" >/dev/null 2>&1; then
         # An unsigned broker cannot hold an entitlement at all, so it always falls back to
         # interposition - which still builds, just without the guarantees, and without saying so.
-        if codesign -d --entitlements - --xml "$BROKER" 2>/dev/null | grep -q 'endpoint-security.client'; then
+        if codesign -d --entitlements - --xml "$SIGN_TARGET" 2>/dev/null | grep -q 'endpoint-security.client'; then
             ok "signed and carries com.apple.developer.endpoint-security.client"
             # An ad-hoc signature carries the entitlement but no certificate to justify it, which is
             # exactly what AMFI refuses. Distinguish the two, because they need opposite machines.
-            if codesign -dv "$BROKER" 2>&1 | grep -qi 'Signature=adhoc'; then
+            if codesign -dv "$SIGN_TARGET" 2>&1 | grep -qi 'Signature=adhoc'; then
                 warn "signature is ad-hoc, so this broker only works on an AMFI-relaxed machine"
             else
                 ENTITLED_BINARY=1

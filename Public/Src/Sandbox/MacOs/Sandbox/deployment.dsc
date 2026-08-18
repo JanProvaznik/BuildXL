@@ -20,7 +20,13 @@ namespace EndpointSecurityDeployment {
     @@public
     export const natives : SdkDeployment.Definition = Context.getCurrentHost().os === "macOS" && {
         contents: [
-            EndpointSecuritySandbox.broker,
+            // The bundled broker when the build was given a provisioning profile, the bare executable
+            // otherwise. Both are deployed by the same name at different paths and BuildXL prefers
+            // the bundle, so a deployment produced by a pipeline that holds the team certificate is a
+            // drop-in replacement for one produced on a development machine.
+            ...(EndpointSecuritySandbox.brokerBundle !== undefined
+                ? [EndpointSecuritySandbox.brokerBundle]
+                : [EndpointSecuritySandbox.broker]),
             EndpointSecuritySandbox.interposeLibrary
         ]
     };
