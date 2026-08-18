@@ -3015,3 +3015,69 @@ descendants client. The default path with no profile is unchanged.
 
 Not verified, because it needs the grant: that a *real* certificate plus profile authorizes the
 entitlement with SIP and AMFI enabled. Everything up to that point is mechanical and now in place.
+
+### 17.18 Handing a build to someone else
+
+The deployment itself is portable, and that was measured rather than assumed. Archiving
+`Out/Selfhost/Dev`, extracting it to an unrelated path, tagging it with `com.apple.quarantine` as a
+downloaded file would be, and pointing it at a *fresh* cache so every pip really executes:
+
+```
+exit 0, 8 of 8 pips executed, 0 disallowed accesses
+```
+
+Nothing in it is position-dependent: the cache config uses `[BuildXLSelectedRootPath]` tokens rather
+than absolute paths, and `otool -L` shows the broker links nothing outside `/usr/lib` and `/System`.
+The injected library travels in the same directory, which is where the broker looks for it.
+
+So what is missing is not in the archive - it is the state of the receiving machine.
+
+| What the recipient needs | Why | Goes away with the entitlement? |
+|---|---|---|
+| macOS 27 | `es_new_descendants_client`. Older falls back to interposition, which works | no |
+| SIP disabled | so the AMFI boot-arg can be set | **yes** |
+| `amfi_get_out_of_my_way=0x1` + reboot | AMFI will not honour a restricted entitlement on an ad-hoc signature | **yes** |
+| CoreCLR patched | consequence of relaxing AMFI, and must be redone after every .NET update | **yes** |
+| Rosetta 2 | grpc ships no `macosx_arm64` `protoc` or `grpc_csharp_plugin` | no |
+| .NET SDK, and `DOTNET_ROOT` set | bxl is a .NET application | no |
+| **quarantine removed from the archive** | see below | mostly |
+
+**The quarantine one is specific to sending, and it is the one that will waste an afternoon.** macOS
+tags anything arriving by download, AirDrop or email with `com.apple.quarantine`, and Gatekeeper then
+assesses it on first execution. An ad-hoc signature does not survive that assessment. Measured
+directly here with `spctl --assess --type execute`, which reports `rejected` for the ad-hoc broker -
+and note `spctl --status` still says `assessments enabled` even on this machine with SIP disabled, so
+turning SIP off does *not* turn Gatekeeper off. The recipient runs:
+
+```bash
+xattr -dr com.apple.quarantine /path/to/Dev
+```
+
+`ci-preflight.sh` now checks this along with everything else in the table, and prints that exact
+command when it finds a quarantined broker that is not signed with a real identity.
+
+**A caveat about this machine.** With AMFI relaxed, a quarantined broker still ran here - which is
+exactly why the check asks `spctl` rather than concluding from a successful run. This machine cannot
+observe its own Gatekeeper behaviour, and neither could a recipient who had already relaxed AMFI.
+
+**Sending it, end to end:**
+
+```bash
+# sender
+tar czf bxl-macos.tgz -C Out/Selfhost Dev
+
+# recipient
+tar xzf bxl-macos.tgz
+xattr -dr com.apple.quarantine Dev
+Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/ci-preflight.sh Dev/bxl-es-broker
+# fix whatever it reports, then re-run until it says Ready
+```
+
+They also need the repository they intend to build; the archive is the engine, not the sources.
+
+**The shape of this changes completely once the entitlement lands.** Four of the seven rows above
+exist only because the broker is ad-hoc signed, and they are the four that require reconfiguring the
+machine. A notarized, properly signed broker reduces the list to: macOS 27, .NET, and Rosetta if the
+build needs grpc. That is an ordinary "install a tool" story rather than "disable your machine's
+security", and it is the difference between something a colleague can try and something only a
+maintainer can run.

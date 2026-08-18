@@ -111,6 +111,21 @@ if [[ -x "$BROKER" ]]; then
     fi
 fi
 
+# A transferred archive is the one case where this matters, which is why it is checked separately
+# from the signature: macOS tags anything that arrives by download, AirDrop or email with
+# com.apple.quarantine, and Gatekeeper then assesses it on first execution. An ad-hoc signature is
+# rejected by that assessment - measured with `spctl --assess`, which reports "rejected" for the
+# ad-hoc broker even on this machine, where SIP is off and Gatekeeper is still enabled. The failure
+# looks like the broker is broken rather than like the archive needs untagging.
+if [[ -x "$BROKER" ]] && xattr -p com.apple.quarantine "$SIGN_TARGET" >/dev/null 2>&1; then
+    if (( ENTITLED_BINARY )); then
+        warn "quarantined; notarization decides whether Gatekeeper accepts it"
+    else
+        fail "quarantined and not signed with a real identity - Gatekeeper will reject it"
+        printf '        xattr -dr com.apple.quarantine %s\n' "$SIGN_TARGET"
+    fi
+fi
+
 # ------------------------------------------------------------------ platform gates
 
 echo
