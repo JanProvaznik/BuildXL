@@ -50,5 +50,6 @@ namespace BuildXL.FrontEnd.Nuget.Tracing
         NugetFailedToWriteGeneratedSpecStateFile = 11333,
         NugetCannotReuseSpecOnDisk = 11334,
         NugetInspectionInitialization = 11335,
+        NugetUnreachableRepository = 11336,
     }
 }

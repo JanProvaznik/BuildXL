@@ -43,6 +43,15 @@ namespace BuildXL.FrontEnd.Nuget
         private readonly StringTable m_stringTable;
         private readonly Func<Possible<string>> m_discoverCredentialProvider;
         private IReadOnlyDictionary<Uri, PackageSourceCredential> m_packageBaseAddress;
+
+        /// <summary>
+        /// Repositories that were configured but whose service index could not be resolved, so they were skipped.
+        /// </summary>
+        /// <remarks>
+        /// Kept so that a package which cannot be found anywhere can say which feeds were not consulted. Without
+        /// that, a missing package and an unreachable feed look identical from the error alone.
+        /// </remarks>
+        private IReadOnlyList<string> m_unreachableRepositories = new List<string>();
         private readonly Lazy<Task<Possible<bool>>> m_initializationResult;
 
         /// <nodoc/>
@@ -88,13 +97,40 @@ namespace BuildXL.FrontEnd.Nuget
                     .Then<bool>(sourceRepositories =>
                     {
                         var packageBaseAddressMutable = new Dictionary<Uri, PackageSourceCredential>();
+                        var unreachable = new List<string>();
+
                         foreach (var sourceRepository in sourceRepositories)
                         {
-                            var serviceIndexResource = sourceRepository.GetResource<ServiceIndexResourceV3>(m_cancellationToken);
+                            // A repository whose service index cannot be resolved is skipped rather than failing the
+                            // whole build. Initializing used to be all-or-nothing, which meant one unreachable feed
+                            // blocked every package - including packages present on a different, reachable feed - and
+                            // reported it against whichever package happened to be downloaded first. That is a
+                            // confusing failure for an ordinary situation: a feed outage, or restricted egress on a
+                            // build machine.
+                            //
+                            // Skipping is not a loosening of what gets resolved, because per-package lookup is already
+                            // first-wins across feeds (see TryInspectAsync): with several feeds carrying the same id
+                            // and version, which one answers is already decided by iteration order rather than by
+                            // configuration. Dropping a feed we cannot talk to is no weaker than that.
+                            //
+                            // It is a warning rather than silence because an unreachable feed can equally be a
+                            // misconfiguration, and because the eventual "package not found" needs to be traceable
+                            // back to it.
+                            ServiceIndexResourceV3 serviceIndexResource;
+                            try
+                            {
+                                serviceIndexResource = sourceRepository.GetResource<ServiceIndexResourceV3>(m_cancellationToken);
+                            }
+                            catch (Exception e) when (e is AggregateException || e is HttpRequestException || e is InvalidOperationException)
+                            {
+                                serviceIndexResource = null;
+                                Logger.Log.NugetUnreachableRepository(m_loggingContext, sourceRepository.PackageSource.SourceUri.ToString(), e.Message);
+                            }
 
                             if (serviceIndexResource == null)
                             {
-                                return new NugetFailure(NugetFailure.FailureType.NoBaseAddressForRepository, $"Cannot find index service for ${sourceRepository.PackageSource.SourceUri}");
+                                unreachable.Add(sourceRepository.PackageSource.SourceUri.ToString());
+                                continue;
                             }
 
                             foreach (Uri packageBaseAddress in serviceIndexResource.GetServiceEntryUris(ServiceTypes.PackageBaseAddress))
@@ -103,6 +139,23 @@ namespace BuildXL.FrontEnd.Nuget
                             }
                         }
 
+                        // Every repository being unreachable is still a failure: there is nowhere left to download
+                        // from, and continuing would turn a network problem into a wall of missing packages.
+                        if (packageBaseAddressMutable.Count == 0)
+                        {
+                            return new NugetFailure(
+                                NugetFailure.FailureType.NoBaseAddressForRepository,
+                                unreachable.Count > 0
+                                    ? $"Cannot find the index service for any configured repository. Unreachable: {string.Join(", ", unreachable)}"
+                                    : "No configured repository exposes a package base address");
+                        }
+
+                        foreach (var skipped in unreachable)
+                        {
+                            Logger.Log.NugetUnreachableRepository(m_loggingContext, skipped, "the service index could not be resolved");
+                        }
+
+                        m_unreachableRepositories = unreachable;
                         m_packageBaseAddress = packageBaseAddressMutable;
 
                         return true;
@@ -164,6 +217,17 @@ namespace BuildXL.FrontEnd.Nuget
                 {
                     return maybeInspectedPackage;
                 }
+            }
+
+            // A package that was not found anywhere, on a build where some repository was skipped, is far more likely
+            // to be a consequence of that than a genuinely missing package. Say so here rather than leaving the two
+            // indistinguishable - the failure otherwise names the package and gives no hint that a feed was missing.
+            if (m_unreachableRepositories.Count > 0)
+            {
+                return new NugetFailure(
+                    NugetFailure.FailureType.PackageNotFound,
+                    $"Package {identity.Id}.{identity.Version} was not found on any reachable repository. " +
+                    $"These repositories were skipped because they could not be reached: {string.Join(", ", m_unreachableRepositories)}");
             }
 
             return maybeInspectedPackage.Failure;

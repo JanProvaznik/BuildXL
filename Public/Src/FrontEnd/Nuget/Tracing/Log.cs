@@ -41,6 +41,19 @@ namespace BuildXL.FrontEnd.Nuget.Tracing
         public abstract void NuGetInspectionInitializationInfo(LoggingContext context, string message);
 
         [GeneratedEvent(
+            (ushort)LogEventId.NugetUnreachableRepository,
+            EventGenerators = EventGenerators.LocalOnly,
+            EventLevel = Level.Warning,
+            Keywords = (ushort)Keywords.UserMessage,
+            EventTask = (ushort)Tasks.Parser,
+            Message =
+                "Repository '{repository}' could not be reached and will be skipped for this build: {message}. " +
+                "Packages that are only available there will fail to download. This is a warning rather than an " +
+                "error because other configured repositories are reachable; if a package cannot be found, the " +
+                "failure will list the repositories that were skipped.")]
+        public abstract void NugetUnreachableRepository(LoggingContext context, string repository, string message);
+
+        [GeneratedEvent(
             (ushort)LogEventId.NugetFailedToWriteSpecFileForPackage,
             EventGenerators = EventGenerators.LocalOnly,
             EventLevel = Level.Error,
