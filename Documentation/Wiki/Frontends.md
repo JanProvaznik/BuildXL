@@ -5,7 +5,7 @@ BuildXL supports a wide variety of build languages and packaging systems. The en
 * The [Ninja frontend](Frontends/Ninja.md), which can be used to [build CMake projects](Frontends/cmake-builds-with-ninja.md) (experimental)
 * MsBuild (in development)
 * [Download](Frontends/Download.md)
-* NuGet
+* [NuGet](Frontends/Nuget.md)
 
 
 The main `config.dsc` file has a field `resolvers` that provides configuration settings for each resolver.
