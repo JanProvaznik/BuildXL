@@ -3175,6 +3175,37 @@ these tools are build-time code generators that turn `.proto` into `.cs` and app
 deployment, which is also why swapping them is safe - the generated sources are identical, so
 everything downstream of codegen is unaffected.
 
-**What is not done here.** The tools were built and proven equivalent, but they were not published
-as a package and run through a full BuildXL build, because this machine cannot reach nuget.org to
-fetch the upstream Grpc.Tools package to repack. The remaining step is packaging, not correctness.
+**Packaging.** `Diagnostics/pack-grpc-arm64-package.sh` wraps the two binaries in a Grpc.Tools
+package carrying exactly what the SDK reads - `tools/macosx_arm64/{protoc,grpc_csharp_plugin}` and
+`build/native/include/google/protobuf/*` for the well-known types, taken from the same protobuf the
+tools were built from so there is no version skew. It refuses to pack a non-arm64 binary, since
+packaging an x86_64 tool would silently defeat the purpose. The version it stamps is deliberately
+distinct (`29.0-macosarm64`): the package carries only one platform, so it must never be mistaken
+for the real Grpc.Tools. Verified: a 4.7 MB package that a local NuGet v3 feed serves over HTTP.
+
+**BuildXL ran the native tools end to end, and the output is identical.** Sourcing `protoc` and
+`grpc_csharp_plugin` from the native build and letting BuildXL execute its own codegen pips produced
+`Interfaces.cs` and `InterfacesGrpc.cs` that are **byte-identical** to what the x86_64 plugin
+produces. That is the claim that matters: the pips run, and nothing downstream can tell the
+difference.
+
+**What is still not done, and why it is environmental.** The package could not be consumed *through
+NuGet* on this machine, because nuget.org is firewalled here and BuildXL loads every configured
+feed's service index before it will download anything - so one unreachable feed blocks all
+downloads, even for a package that is sitting on a reachable local feed.
+
+The obvious workaround, dropping the unreachable feed, does not work, and the reason is worth
+recording because it is not obvious. BuildXL keys a downloaded package on the *whole repository
+list*:
+
+```
+nuget://id=Grpc.Tools&version=2.71.0&repos=HTTP://127.0.0.1:8213/INDEX.JSON,HTTPS://API.NUGET.ORG/...&cred=
+```
+
+Removing or repointing any feed therefore changes the key of **every** package, invalidating the
+entire local NuGet cache and forcing a full re-download that this machine cannot perform. Measured:
+dropping nuget.org makes an unrelated package (`NLog`) fail to restore immediately.
+
+So the sequence on a machine with normal network access is simply: build the tools, pack them,
+publish to a feed, pin `Grpc.Tools` to that version, build. Every step of that is verified here
+except the download itself, which is blocked by the firewall rather than by anything in the design.
