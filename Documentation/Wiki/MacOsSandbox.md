@@ -3126,3 +3126,55 @@ machine. A notarized, properly signed broker reduces the list to: macOS 27, .NET
 build needs grpc. That is an ordinary "install a tool" story rather than "disable your machine's
 security", and it is the difference between something a colleague can try and something only a
 maintainer can run.
+
+### 17.19 Removing the last Rosetta requirement
+
+Rosetta 2 is needed to *build* BuildXL from source on Apple silicon because gRPC ships `protoc` and
+`grpc_csharp_plugin` for `macosx_x64` and not `macosx_arm64`. The upstream fix was proposed and
+abandoned - grpc/grpc#41222, "Add native macOS ARM64 support via universal binaries", closed without
+merging - so waiting is not a strategy. Building them is, and it works.
+
+**Only the plugin actually needed building.** `protoc` is published for arm64 by protobuf itself
+(`protoc-<version>-osx-aarch_64.zip` on protobuf's releases), and building protobuf from the
+submodule that gRPC pins produces a matching one anyway. The gap upstream is `grpc_csharp_plugin`
+alone, which is why this is a small job rather than a port: it is a protoc plugin, so it links
+`libprotoc` and **none of gRPC's C-core**. Three `.cc` files and protobuf are the entire dependency.
+
+**The result is a drop-in replacement, and that is measured rather than asserted.** Generating from
+all seven of the repository's `.proto` files with the same `protoc` and only swapping the plugin -
+x86_64 under Rosetta against the native arm64 build - produces **byte-identical output in all seven
+cases**, including every gRPC service stub. `Diagnostics/build-grpc-arm64-tools.sh` builds the tools
+and performs exactly that comparison, failing with exit 3 if anything differs.
+
+**No SDK change is required.** `Public/Sdk/Public/Protocols/Grpc/protoc.dsc` already asks the
+Grpc.Tools package which tool folders it carries and prefers `tools/macosx_arm64` when present,
+falling back to `macosx_x64` otherwise. So the whole change is a package that has the folder:
+
+```bash
+Public/Src/Sandbox/MacOs/Sandbox/Diagnostics/build-grpc-arm64-tools.sh --out ./arm64-tools
+# then place protoc and grpc_csharp_plugin into a Grpc.Tools package as tools/macosx_arm64/
+# and point the build at it; the SDK picks it up with no code change
+```
+
+Three details in that build cost real time to find, and all three are encoded in the script:
+
+- **No `-std` flag.** CMake passes none when building protobuf, so protobuf and abseil compile at
+  Apple clang's default, which is **C++14**. At C++14 `absl::string_view` is abseil's own class; at
+  C++17 it is an alias for `std::string_view`. Building the plugin with `-std=c++17` therefore
+  produces references that nothing in `libprotoc` matches, and the link fails on functions the
+  archive plainly defines. Matching protobuf's flags is what matters, not picking a modern standard.
+- **`-force_load` on `libprotoc`.** The C# *message* generator inside it is only reachable
+  transitively, so an ordinary archive link leaves `csharp::GetOutputFile` undefined.
+- **`proto_parser_helper.cc`** is needed alongside the two obvious `csharp_*.cc` files, or the link
+  fails on one symbol, `grpc_generator::EscapeVariableDelimiters`.
+
+**What this is worth.** Rosetta was the last thing on the from-source build list that is not simply
+"install .NET". Removing it also removes the awkwardness of asking someone to install an x86_64
+emulator in order to build a *native* arm64 toolchain. It changes nothing about what BuildXL ships:
+these tools are build-time code generators that turn `.proto` into `.cs` and appear in no
+deployment, which is also why swapping them is safe - the generated sources are identical, so
+everything downstream of codegen is unaffected.
+
+**What is not done here.** The tools were built and proven equivalent, but they were not published
+as a package and run through a full BuildXL build, because this machine cannot reach nuget.org to
+fetch the upstream Grpc.Tools package to repack. The remaining step is packaging, not correctness.
