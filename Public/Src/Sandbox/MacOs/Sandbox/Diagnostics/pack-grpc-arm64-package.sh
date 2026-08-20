@@ -23,6 +23,12 @@
 # for the real Grpc.Tools. Publish it to a local feed and pin it there, rather than substituting it
 # for the upstream package.
 #
+# The folder is macosx_arm64 rather than upstream's macosx_universal on purpose. Upstream's name
+# means "runs on either architecture", and the binaries here are arm64-only; putting them at that
+# path would produce a package that claims to work on an Intel Mac and does not. The BuildXL SDK
+# probes macosx_universal, then macosx_arm64, then macosx_x64, so this package is still preferred
+# over the emulated tools on Apple silicon and is ignored everywhere else.
+#
 # Exit codes: 0 packed, 1 a prerequisite is missing.
 
 set -uo pipefail

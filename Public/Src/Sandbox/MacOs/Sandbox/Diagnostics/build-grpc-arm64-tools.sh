@@ -6,11 +6,19 @@
 #
 # Why this exists
 # ---------------
-# gRPC publishes protoc and grpc_csharp_plugin for macosx_x64 but not macosx_arm64, so every
+# Every *released* Grpc.Tools publishes protoc and grpc_csharp_plugin for macosx_x64 only, so every
 # protobuf codegen pip on an Apple silicon Mac runs under Rosetta 2. That makes Rosetta a hard
-# requirement for building BuildXL from source on arm64 - the only such requirement left. The
-# upstream pull request that would have fixed it (grpc/grpc#41222, "Add native macOS ARM64 support
-# via universal binaries") was closed without being merged, so there is nothing to wait for.
+# requirement for building BuildXL from source on arm64 - the only such requirement left.
+#
+# Upstream has fixed this, but not yet in a release. grpc/grpc#41222 shows as closed and unmerged on
+# GitHub because gRPC merges through an internal import, which closes a pull request without marking
+# it merged; the change is in master as commit 0e6c80de9, dated 2026-08-10. The newest release at
+# the time of writing is v1.83.0 from 2026-07-22, three weeks earlier, so no package carries it yet.
+#
+# Note upstream ships a *universal* binary in a folder named macosx_universal, not macosx_arm64.
+# This script builds arm64-only, which is smaller and is all an Apple silicon machine needs; the
+# BuildXL SDK probes macosx_universal, macosx_arm64 and macosx_x64 in that order, so a package built
+# here is selected on arm64 without pretending to be the universal one.
 #
 # The tools are only *code generators*: they turn .proto into .cs at build time and are not part of
 # any deployment. So replacing them with native binaries changes nothing about what BuildXL ships -

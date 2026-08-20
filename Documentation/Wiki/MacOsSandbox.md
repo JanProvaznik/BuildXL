@@ -3049,12 +3049,10 @@ needed only to *compile BuildXL from source*, because the protobuf code generato
 
 - `protoc` and `grpc_csharp_plugin` are **build-time** code generators. They turn `.proto` files
   into `.cs` at compile time and live in the NuGet package cache, not in the deployment.
-- `Google.Protobuf.Tools` ships `macosx_x64` only; `Grpc.Tools` likewise. Confirmed upstream rather
-  than inferred: a code search of `grpc/grpc` finds `macosx_x64` and **zero** occurrences of
-  `macosx_arm64`, and the PR that proposed native macOS ARM64 support via universal binaries
-  (grpc/grpc#41222) was closed without being merged.
-- The SDK already prefers `tools/macosx_arm64` and falls back to `macosx_x64`, so the day grpc ships
-  arm64 tooling this requirement disappears with a version bump and no code change.
+- Every *released* `Grpc.Tools` ships `macosx_x64` only, so on Apple silicon they run under Rosetta.
+- This is changing, and not in the shape assumed here originally. See §17.20: the upstream fix
+  merged on 2026-08-10 under the name `macosx_universal`, not `macosx_arm64`, and it *replaces*
+  `macosx_x64` rather than joining it.
 
 **What BuildXL uses gRPC for at all**, since it is reasonable to ask why a local build drags this in.
 Seven `.proto` files, and the distinction between them matters:
@@ -3129,10 +3127,18 @@ maintainer can run.
 
 ### 17.19 Removing the last Rosetta requirement
 
-Rosetta 2 is needed to *build* BuildXL from source on Apple silicon because gRPC ships `protoc` and
-`grpc_csharp_plugin` for `macosx_x64` and not `macosx_arm64`. The upstream fix was proposed and
-abandoned - grpc/grpc#41222, "Add native macOS ARM64 support via universal binaries", closed without
-merging - so waiting is not a strategy. Building them is, and it works.
+Rosetta 2 is needed to *build* BuildXL from source on Apple silicon because every released
+Grpc.Tools ships `protoc` and `grpc_csharp_plugin` for `macosx_x64` only.
+
+**Correction.** An earlier version of this section said the upstream fix had been abandoned, because
+grpc/grpc#41222 shows as closed with `merged: false`. That reading was wrong. gRPC merges through an
+internal import, which closes the GitHub pull request without ever marking it merged, so
+`merged: false` carries no information. The change landed on **2026-08-10** as commit `0e6c80de9`.
+§17.20 covers what it does, and why it matters to BuildXL for a reason beyond Rosetta.
+
+Building the tools from source is still worth having, because no *released* package carries the
+change yet - the newest release is v1.83.0 from 2026-07-22, three weeks before the merge. And it
+works.
 
 **Only the plugin actually needed building.** `protoc` is published for arm64 by protobuf itself
 (`protoc-<version>-osx-aarch_64.zip` on protobuf's releases), and building protobuf from the
@@ -3209,3 +3215,68 @@ dropping nuget.org makes an unrelated package (`NLog`) fail to restore immediate
 So the sequence on a machine with normal network access is simply: build the tools, pack them,
 publish to a feed, pin `Grpc.Tools` to that version, build. Every step of that is verified here
 except the download itself, which is blocked by the firewall rather than by anything in the design.
+
+### 17.20 The upstream fix landed, and it breaks BuildXL rather than just helping it
+
+grpc/grpc#41222 shows on GitHub as closed with `merged: false`, which is what led §17.19 to say it
+had been abandoned. That was wrong, and the way it was wrong is worth knowing: **gRPC merges through
+an internal import, which closes the pull request without marking it merged**, so `merged: false` on
+a gRPC pull request carries no information at all. The change is in `master` as commit `0e6c80de9`,
+dated **2026-08-10**.
+
+An earlier code search here for `macosx_arm64` returned zero hits and appeared to confirm the wrong
+conclusion. It did not: the merged change never uses that name.
+
+**What upstream actually did.** macOS now gets a *single universal* binary in a folder called
+`macosx_universal`, and `ProtoToolsPlatform.cs` maps every macOS CPU to it:
+
+```csharp
+// macOS ships a single universal (x64 + arm64) binary, so both
+// architectures resolve to the same 'macosx_universal' tools folder.
+if (Os == "macosx")
+{
+    Cpu = "universal";
+}
+```
+
+The critical detail is that `macosx_x64` is **replaced, not supplemented**. `Grpc.Tools.csproj` packs
+`tools/macosx_universal/` and no longer packs `tools/macosx_x64/`, and grpc's own
+`BUILD-INTEGRATION.md` spells out the consequence: *"a build that hard-codes a literal
+`tools/macosx_x64/...` path must be updated to `tools/macosx_universal/...`"*.
+
+**So this is a latent break in BuildXL, not an improvement waiting to be collected.** Before this
+change, `protoc.dsc` asked for `macosx_arm64` (which upstream has never shipped) and fell back to
+`macosx_x64`. On the first Grpc.Tools that carries the merge, that fallback folder is simply absent,
+so `pkgContents.getFile(r`tools/macosx_x64/protoc`)` fails - on **every** Mac, Intel included. The
+symptom would be a missing-file error naming a path nobody wrote down, arriving as a side effect of
+a routine dependency bump, on the platform least likely to be covered by CI.
+
+**Timing.** No released package carries it yet. The newest release is v1.83.0, published 2026-07-22,
+three weeks before the merge; Grpc.Tools versions track gRPC core, so the first affected package is
+whatever ships after 1.83. That is the window to fix this in, and it is why the fix is worth making
+now rather than when a build starts failing.
+
+**The fix.** `protoc.dsc` now probes an ordered list of candidate folders and takes the first the
+package actually carries, instead of naming one folder per platform:
+
+| Host | Candidates, best first |
+|---|---|
+| macOS arm64 | `macosx_universal`, `macosx_arm64`, `macosx_x64` |
+| macOS x64 | `macosx_universal`, `macosx_x64` |
+| Linux arm64 | `linux_arm64`, `linux_x64` |
+
+This is correct across the transition in both directions: today's packages resolve to `macosx_x64`
+exactly as before, and the first package carrying the merge resolves to `macosx_universal` - which
+on Apple silicon is *native*, so the Rosetta requirement disappears at the same moment, with no
+further change. `macosx_arm64` stays in the list because it is the natural layout for an arm64-only
+package built from source (§17.19), which is how to get native tooling before an upstream release
+carries it; upstream has never published that folder and, given the universal binary, never will.
+
+If none of the candidates is present the SDK fails with a message naming what it looked for, because
+the alternative is a missing-file error against a path that appears nowhere in the configuration.
+
+**Verified.** With today's Grpc.Tools 2.71.0 the protoc-consuming spec builds with **24 of 24 cache
+hits** - unchanged fingerprints, so the selection resolves to the same folder the old code chose, and
+the change is a no-op on current packages. That run also exercises the new mechanism rather than
+merely compiling it: `macosx_universal` and `macosx_arm64` are absent and skipped, and `macosx_x64`
+is chosen. The forward case differs only in which names the package carries.

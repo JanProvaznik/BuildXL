@@ -17,39 +17,64 @@ const isHostArm64 : boolean = currentHost.cpuArchitecture === "arm64";
  * True when Grpc.Tools carries a tool folder with the given name.
  *
  * The package does not ship a folder for every OS/architecture pair, and which pairs are present
- * changes over time. As of 2.71.0 it carries linux_arm64 but no macosx_arm64, and grpc publishes no
- * standalone plugin binaries anywhere else, so on an arm64 Mac there is currently nothing native to
- * run. Asking the package what it holds - rather than hard-coding today's answer - means the arm64
- * folders get picked up automatically, with no change here, as soon as upstream adds them.
+ * changes across versions, so the folder is chosen by asking the package what it actually holds
+ * rather than by hard-coding one name per platform.
  */
 function hasToolDir(name: PathAtom) : boolean {
     const dir = d`${pkgContents.root}/tools/${name}`;
     return pkgContents.getContent().filter(file => (<File>file).isWithin(dir)).length > 0;
 }
 
-const nativeBinDir =
-    isHostOsWin   ? a`windows_x64` :
-    isHostOsOsx   ? (isHostArm64 ? a`macosx_arm64` : a`macosx_x64`) :
-    isHostOsLinux ? (isHostArm64 ? a`linux_arm64`  : a`linux_x64`)  :
+/**
+ * Tool folders to use for this host, best first.
+ *
+ * macOS is the interesting case, and it is a moving target. Up to and including Grpc.Tools 2.83 the
+ * package carried `macosx_x64` only, so an arm64 Mac had nothing native to run and every protobuf
+ * codegen pip went through Rosetta 2. grpc/grpc#41222 changed that on 2026-08-10: macOS now ships a
+ * single universal binary as `macosx_universal`, and - this is the part that matters here -
+ * `macosx_x64` is *replaced* rather than supplemented. grpc's own BUILD-INTEGRATION.md is explicit:
+ * "a build that hard-codes a literal tools/macosx_x64/... path must be updated to
+ * tools/macosx_universal/...".
+ *
+ * So a single hard-coded name is wrong in both directions. Naming only `macosx_x64` breaks outright
+ * on the first package that ships the change, because the folder simply is not there any more.
+ * Naming only `macosx_universal` breaks on every version released so far. Probing an ordered list
+ * handles both, and picks up the native tools on arm64 the moment a package carrying them is used.
+ *
+ * `macosx_arm64` is probed between the two because it is the natural layout for an arm64-only
+ * package built from source, which is the way to get native tooling before an upstream release
+ * carries it. Upstream has never published that folder and, given the universal binary, never will.
+ */
+const binDirCandidates : PathAtom[] =
+    isHostOsWin   ? [a`windows_x64`] :
+    isHostOsOsx   ? (isHostArm64
+                        ? [a`macosx_universal`, a`macosx_arm64`, a`macosx_x64`]
+                        : [a`macosx_universal`, a`macosx_x64`]) :
+    isHostOsLinux ? (isHostArm64
+                        ? [a`linux_arm64`, a`linux_x64`]
+                        : [a`linux_x64`]) :
     Contract.fail("Unsupported OS");
 
 /**
- * Where an arm64 host has no native folder to fall back from, the x64 tools are used instead. That
- * is what every macOS build has done to date, and it only works under emulation (Rosetta 2 on
- * macOS); without it protoc fails to start at all.
+ * The first candidate the package actually carries.
+ *
+ * On an arm64 host the later candidates are x64 folders, which only run under emulation - Rosetta 2
+ * on macOS. That is what every macOS build did before the universal binary existed; without the
+ * emulator protoc fails to start at all.
  */
-const emulatedBinDir =
-    isHostOsWin   ? a`windows_x64` :
-    isHostOsOsx   ? a`macosx_x64` :
-    a`linux_x64`;
+const binDir = binDirCandidates.filter(candidate => hasToolDir(candidate))[0];
 
-const binDir = hasToolDir(nativeBinDir) ? nativeBinDir : emulatedBinDir;
+// Failing here names the problem. Letting it through produces a missing-file error against a path
+// nobody wrote down, which reads as a corrupt package rather than an unsupported platform.
+const binDirOrFail = binDir !== undefined
+    ? binDir
+    : Contract.fail(`Grpc.Tools carries none of the expected tool folders for this host: ${binDirCandidates.map(c => c.toString()).join(", ")}`);
 
 @@public
 export const tool: Transformer.ToolDefinition = {
     exe: pkgContents.getFile(isHostOsWin
         ? r`tools/windows_x64/protoc.exe`
-        : r`tools/${binDir}/protoc`),
+        : r`tools/${binDirOrFail}/protoc`),
     dependsOnCurrentHostOSDirectories: true
 };
 
@@ -57,7 +82,7 @@ export const tool: Transformer.ToolDefinition = {
 export const pluginPath = (() => {
     const pluginPath = pkgContents.getFile(isHostOsWin
         ? r`tools/windows_x64/grpc_csharp_plugin.exe`
-        : r`tools/${binDir}/grpc_csharp_plugin`);
+        : r`tools/${binDirOrFail}/grpc_csharp_plugin`);
 
     const outDir = Context.getNewOutputDirectory("plugin-exe");
     const outExe = p`${outDir}/${pluginPath.name}`;
