@@ -3251,10 +3251,12 @@ so `pkgContents.getFile(r`tools/macosx_x64/protoc`)` fails - on **every** Mac, I
 symptom would be a missing-file error naming a path nobody wrote down, arriving as a side effect of
 a routine dependency bump, on the platform least likely to be covered by CI.
 
-**Timing.** No released package carries it yet. The newest release is v1.83.0, published 2026-07-22,
-three weeks before the merge; Grpc.Tools versions track gRPC core, so the first affected package is
-whatever ships after 1.83. That is the window to fix this in, and it is why the fix is worth making
-now rather than when a build starts failing.
+**Timing.** No released package carries it yet, and none is imminent: the newest release is v1.83.0
+from 2026-07-22, three weeks *before* the merge, and no `v1.84.x` release branch has been cut. Since
+Grpc.Tools versions track gRPC core, the first affected package is Grpc.Tools 2.84.0. Recent releases
+have been roughly six weeks apart, so there is time - which is exactly why this is worth fixing now,
+while it is a two-line ordering change, rather than when a dependency bump starts failing macOS
+builds with an error that points at a path nobody configured.
 
 **The fix.** `protoc.dsc` now probes an ordered list of candidate folders and takes the first the
 package actually carries, instead of naming one folder per platform:
